@@ -335,6 +335,14 @@ async def call_socket(socket: WebSocket, call_id: str) -> None:
         "greeting": live.conversation.config.greeting,
     })
 
+    # The greeting needs a voice too. It was the one line that never got synthesised, so on a
+    # voice call the agent opened in silence -- and the browser's own speech engine filled the
+    # gap, which is both the wrong voice and the source of the echo the microphone kept hearing.
+    if live.channel == "voice" and p.voice.ready:
+        from ..brain.speakable import speakable
+
+        await _stream_voice(socket, p, live, speakable(live.conversation.config.greeting))
+
     try:
         while True:
             message = await socket.receive_json()

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ViewProps } from '../App'
 import { api, openCall, type Grounding, type Hit, type Timing } from '../api'
 import { Icon } from '../components/Icon'
-import { AudioQueue, Listener, MicLevel, loadVoices, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
+import { AudioQueue, Listener, MicLevel, clearSpokenMemory, loadVoices, rememberSpoken, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
 
 /* Talking to the agent, by typing or by voice.
  *
@@ -59,6 +59,10 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   // which is how "to first word" came out LARGER than the whole turn it belonged to.
   const firstTokenAt = useRef<number | null>(null)
   const audio = useRef<AudioQueue | null>(null)
+  // A ref as well as state. `start` reads this when the call opens, and the health check that
+  // sets it is async -- so a call started before it resolved captured 'browser', spoke the
+  // greeting with the robotic voice, and fed it straight back into the microphone.
+  const engine = useRef<'kokoro-82m' | 'browser'>('browser')
   // Last threshold the gateway gave us, and when. Speech recognition emits a partial per word,
   // so scoring every one meant a network round trip per syllable -- several a second, each one
   // delaying the timer it was supposed to be arming.
@@ -82,7 +86,11 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   // hearing instead of leaving you to guess why it sounds different.
   useEffect(() => {
     api.health()
-      .then((h) => setVoiceEngine(h.voice?.ready ? 'kokoro-82m' : 'browser'))
+      .then((h) => {
+        const which = h.voice?.ready ? 'kokoro-82m' : 'browser'
+        engine.current = which
+        setVoiceEngine(which)
+      })
       .catch(() => undefined)
   }, [])
 
@@ -155,10 +163,15 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     setPhase('connecting')
     setLines([])
     setSummary(null)
+    clearSpokenMemory()
     try {
       const { call_id, greeting } = await api.startCall(agentId, voiceOn ? 'voice' : 'text')
       setLines([{ who: 'agent', text: greeting }])
-      if (voiceOn && voiceEngine === 'browser') {
+      rememberSpoken(greeting)
+      // The gateway synthesises the greeting itself when the neural voice is loaded, so this
+      // only runs on the fallback path. Reading the ref rather than the state value is what
+      // stops a call opened during startup from speaking it twice, in two different voices.
+      if (voiceOn && engine.current === 'browser') {
         speak(greeting, {
           voice: agent?.voice,
           onStart: () => setAgentSpeaking(true),
@@ -201,7 +214,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
           // Only speak here when the gateway is NOT sending audio. With the neural engine the
           // reply arrives as `audio` chunks instead, and doing both would have the agent say
           // every sentence twice in two different voices.
-          if (voiceOn && voiceEngine === 'browser') {
+          if (voiceOn && engine.current === 'browser') {
             speak(String(event.spoken ?? event.agent ?? ''), {
               voice: agent?.voice,
               onStart: () => setAgentSpeaking(true),
@@ -213,9 +226,11 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
           const first = event.first_audio_ms as number | null
           if (first != null) {
             setFirstAudioMs(Math.round(first))
-            audio.current?.markSpeaking()
             setAgentSpeaking(true)
           }
+          // Every chunk re-arms the mute and adds its words to the echo memory. Doing this only
+          // on the first chunk left the guard expiring midway through a long reply.
+          audio.current?.markSpeaking(String(event.text ?? ''))
           void audio.current?.push(String(event.wav))
         }
         if (type === 'audio_failed') {
@@ -231,7 +246,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
       setLines([{ who: 'agent', text: `Could not start the call: ${String(error)}` }])
       setPhase('idle')
     }
-  }, [agentId, agent, voiceOn, voiceEngine])
+  }, [agentId, agent, voiceOn])
 
   const hangup = useCallback(() => {
     socket.current?.hangup()

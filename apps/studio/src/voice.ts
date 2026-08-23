@@ -85,7 +85,61 @@ export interface ListenerHandlers {
  */
 let agentSpeaking = false
 
+/**
+ * What the agent has said recently, normalised for comparison.
+ *
+ * TIME-BASED MUTING IS NOT ENOUGH, and this is the part that took two attempts to get right.
+ * Speech recognition does not deliver a transcript when the sound happens — it delivers it
+ * several hundred milliseconds later, after processing. So audio the microphone picked up WHILE
+ * the agent was speaking arrives AFTER the speaking flag has cleared, walks straight past the
+ * mute, and is treated as the caller.
+ *
+ * The log showed exactly that: the agent's own greeting, "Hello, how can I assist you today?",
+ * arriving at the endpointer as caller speech.
+ *
+ * So the agent's own words are also matched by CONTENT. A transcript that is mostly made of
+ * words the agent just said is the agent, whenever it arrives.
+ */
+const spokenRecently: { words: Set<string>; until: number }[] = []
+
 export const isAgentSpeaking = (): boolean => agentSpeaking
+
+const normalise = (text: string): string[] =>
+  text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
+
+/** Remember an utterance so its echo can be recognised for the next few seconds. */
+export function rememberSpoken(text: string): void {
+  const words = normalise(text)
+  if (words.length < 2) return
+  const now = Date.now()
+  // Long enough to cover recognition lag and a slow chunk; short enough that a caller genuinely
+  // repeating the agent's words a few seconds later is still heard.
+  spokenRecently.push({ words: new Set(words), until: now + 6000 })
+  while (spokenRecently.length && spokenRecently[0].until < now) spokenRecently.shift()
+}
+
+/**
+ * Is this transcript the agent coming back through the microphone?
+ *
+ * A high word overlap with something the agent said in the last few seconds. The threshold is
+ * deliberately high: a caller answering "yes" or "Thursday" shares words with the question they
+ * were asked, and rejecting those would make the agent deaf to the most common replies there are.
+ */
+export function looksLikeEcho(text: string): boolean {
+  const words = normalise(text)
+  if (words.length < 3) return false          // too short to judge; let the mute handle it
+  const now = Date.now()
+  for (const entry of spokenRecently) {
+    if (entry.until < now) continue
+    const shared = words.filter((w) => entry.words.has(w)).length
+    if (shared / words.length >= 0.75) return true
+  }
+  return false
+}
+
+export function clearSpokenMemory(): void {
+  spokenRecently.length = 0
+}
 
 /**
  * Continuous microphone transcription.
@@ -134,6 +188,11 @@ export class Listener {
         }
       }
       const combined = `${this.settled} ${interim}`.trim()
+      // Second line of defence, for echo that arrives after the mute has lifted.
+      if (combined && looksLikeEcho(combined)) {
+        this.settled = ''
+        return
+      }
       if (combined) this.handlers.onPartial(combined)
     }
 
@@ -255,6 +314,7 @@ export function speak(
   utterance.pitch = 1.0
   utterance.onstart = () => {
     agentSpeaking = true
+    rememberSpoken(text)
     opts.onStart?.()
   }
   const finish = () => {
@@ -413,14 +473,22 @@ export class AudioQueue {
     return this.pending > 0
   }
 
-  /** Mark the agent as speaking for as long as audio is queued, so the mic stays muted. */
-  markSpeaking(): void {
+  /** Mark the agent as speaking, and remember the words so their echo can be recognised. */
+  markSpeaking(text?: string): void {
     agentSpeaking = true
+    if (text) rememberSpoken(text)
   }
 
   markDone(): void {
-    // Same tail as the browser path: the speakers are still settling when the buffer ends.
-    window.setTimeout(() => { agentSpeaking = false }, 250)
+    // Hold the mute until everything SCHEDULED has actually finished, not just until the last
+    // buffer that happened to end. Chunks arrive with gaps, so the queue can momentarily empty
+    // while more are still coming, and unmuting there let the next chunk straight back into the
+    // microphone. `playAt` is the audio clock's own answer to "when does the agent stop".
+    const context = this.context
+    const remaining = context ? Math.max(0, this.playAt - context.currentTime) * 1000 : 0
+    window.setTimeout(() => {
+      if (!this.playing) agentSpeaking = false
+    }, remaining + 400)
   }
 
   close(): void {

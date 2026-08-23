@@ -69,4 +69,5 @@ jobs:
           cache-dependency-path: apps/studio/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
+      - run: npx vitest run
       - run: npm run build
