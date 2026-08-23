@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gateway:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    defaults:
+      run:
+        working-directory: services/gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - run: pip install -e ".[serve,dev]"
+      - run: python -m ruff check src tests
+      - run: python -m pytest -q
+
+      # The benchmark is part of CI on purpose. It is the headline claim of the project, so a
+      # change that quietly regresses it should fail the build rather than be discovered in a
+      # README that no longer matches the code.
+      - name: the headline result still holds
+        run: |
+          python - <<'PY'
+          from dialtone.eval.endpointing import ablate
+          results = {r.label: r for r in ablate()}
+          best = results["+ both (default)"]
+          baseline = results["baseline fixed 700ms"]
+
+          assert best.false_cutoff_rate == 0.0, (
+              f"the default configuration now talks over {best.false_cutoff_rate:.1%} of "
+              f"unfinished turns"
+          )
+          assert best.completion_recall == 1.0, "it no longer answers every finished turn"
+          assert best.median_latency_ms < baseline.median_latency_ms / 2, (
+              f"the speedup fell to {baseline.median_latency_ms / best.median_latency_ms:.2f}x"
+          )
+          print(
+              f"ok: {best.median_latency_ms:.0f}ms median, "
+              f"{best.false_cutoff_rate:.1%} false cutoff, "
+              f"{baseline.median_latency_ms / best.median_latency_ms:.1f}x vs baseline"
+          )
+          PY
+
+      - name: every scenario still runs end to end
+        run: python -m dialtone.cli call run all
+
+  studio:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/studio
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: apps/studio/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build

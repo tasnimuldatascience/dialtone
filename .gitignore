@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+apps/*/dist/
+apps/*/.vite/
+*.tsbuildinfo
+
+# Local
+.env
+.env.local
+*.log
+.DS_Store
