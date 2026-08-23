@@ -62,6 +62,32 @@ export interface ListenerHandlers {
 }
 
 /**
+ * True while the agent is speaking out loud.
+ *
+ * THE ECHO PROBLEM. With speakers on, the microphone hears the agent. Web Speech transcribes it
+ * happily, the endpointer treats it as the caller, and the agent starts answering its own
+ * sentences — which is exactly what happened the first time this was used with voice on:
+ *
+ *     agent says:   "Certainly. Prices vary based on the service."
+ *     mic hears:    "certainly are prices vary based on the service"
+ *     endpointer:   sends that to the agent as if the caller had said it
+ *
+ * Two defences, because neither is sufficient alone. The browser's own echo cancellation
+ * (requested in `MicLevel`) removes most of it on a headset and much less of it on laptop
+ * speakers at volume. So recognition results are also DISCARDED while the agent is speaking —
+ * half-duplex, which is what a phone line does anyway, and what every hands-free device has done
+ * since long before any of this.
+ *
+ * The cost is that a caller genuinely interrupting mid-sentence is not heard until the agent
+ * stops. That is the correct trade for a browser demo: the alternative is an agent that
+ * interrupts itself, which is unusable rather than merely limited. On a real telephony path the
+ * carrier does echo cancellation and `turn/bargein.py` handles the rest.
+ */
+let agentSpeaking = false
+
+export const isAgentSpeaking = (): boolean => agentSpeaking
+
+/**
  * Continuous microphone transcription.
  *
  * Deliberately does NOT decide when a turn has ended — it reports words, and the caller decides.
@@ -91,6 +117,11 @@ export class Listener {
     recognition.lang = this.lang
 
     recognition.onresult = (event) => {
+      // Drop anything heard while the agent is talking: it is the agent, coming back through
+      // the microphone. Discarding rather than pausing recognition keeps the engine warm, which
+      // matters because restarting it costs a beat of real speech.
+      if (agentSpeaking) return
+
       let interim = ''
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const result = event.results[i]
@@ -222,15 +253,25 @@ export function speak(
   // Slightly quicker than default: browser TTS reads noticeably slower than a receptionist does.
   utterance.rate = opts.rate ?? 1.06
   utterance.pitch = 1.0
-  utterance.onstart = () => opts.onStart?.()
-  utterance.onend = () => opts.onEnd?.()
-  utterance.onerror = () => opts.onEnd?.()
+  utterance.onstart = () => {
+    agentSpeaking = true
+    opts.onStart?.()
+  }
+  const finish = () => {
+    // A short tail after the audio ends: the speakers are still settling and the last syllable
+    // reaches the microphone slightly after the engine considers itself done.
+    window.setTimeout(() => { agentSpeaking = false }, 250)
+    opts.onEnd?.()
+  }
+  utterance.onend = finish
+  utterance.onerror = finish
 
   speechSynthesis.speak(utterance)
   return { cancel: () => speechSynthesis.cancel() }
 }
 
 export function stopSpeaking(): void {
+  agentSpeaking = false
   if (synthSupported()) speechSynthesis.cancel()
 }
 
@@ -249,7 +290,12 @@ export class MicLevel {
 
   async start(onLevel: (level: number) => void): Promise<void> {
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      // Ask the browser for echo cancellation, noise suppression and gain control. It handles
+      // most of the speaker bleed on a headset; the half-duplex guard in `Listener` covers what
+      // it misses on open laptop speakers.
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      })
     } catch {
       return                                  // permission refused; the meter simply stays flat
     }

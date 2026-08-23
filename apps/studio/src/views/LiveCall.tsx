@@ -42,6 +42,8 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   const [endpointMs, setEndpointMs] = useState<number | null>(null)
   const [firstToken, setFirstToken] = useState<number | null>(null)
   const [summary, setSummary] = useState<Record<string, unknown> | null>(null)
+  const [agentSpeaking, setAgentSpeaking] = useState(false)
+  const [silenceMs, setSilenceMs] = useState(0)
 
   const socket = useRef<ReturnType<typeof openCall> | null>(null)
   const listener = useRef<Listener | null>(null)
@@ -54,6 +56,21 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   // `firstToken` was at that moment, so reading the state inside it measured the previous turn --
   // which is how "to first word" came out LARGER than the whole turn it belonged to.
   const firstTokenAt = useRef<number | null>(null)
+  // Last threshold the gateway gave us, and when. Speech recognition emits a partial per word,
+  // so scoring every one meant a network round trip per syllable -- several a second, each one
+  // delaying the timer it was supposed to be arming.
+  const lastScore = useRef({ at: 0, ms: 700 })
+  //: When the microphone last heard actual speech. THE turn-taking signal.
+  //:
+  //: An earlier version watched the TRANSCRIPT instead: arm a timer on each partial, fire if no
+  //: new partial arrived. That is not silence detection, and it cut people off mid-sentence --
+  //: Web Speech delivers interim results in bursts and goes quiet for a second while it
+  //: processes, which reads as a finished turn when it is nothing of the kind.
+  //:
+  //: The real endpointer works on `silence_ms` from voice-activity frames, and so does this now.
+  //: The level meter was already measuring exactly the right thing.
+  const lastVoiceAt = useRef(0)
+  const speechSeen = useRef(false)
 
   useEffect(() => { void loadVoices() }, [])
 
@@ -94,26 +111,24 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
 
   /* THE ENDPOINTER, in the browser.
    *
-   * Asks the gateway how finished the sentence sounds, then waits that long for more speech. It
-   * is the same rule the benchmark measures, applied to a live microphone: "my account number is
-   * four two" buys ~1.6s of patience, a finished question buys ~250ms. */
-  const armEndpoint = useCallback(async (text: string) => {
-    window.clearTimeout(silenceTimer.current)
+   * Keeps the threshold for the current transcript up to date. It does not decide anything --
+   * the decision is made by the silence loop below, against real audio. "my account number is
+   * four two" buys ~1.6 seconds of patience; a finished question buys ~250ms.
+   */
+  const rescore = useCallback(async (text: string) => {
     if (!text.trim()) return
-    let waitMs = 700
+    // Throttled: recognition emits a partial per word, and the threshold barely moves between
+    // two consecutive words. A stale value for 200ms is a far smaller error than a network round
+    // trip per syllable.
+    if (performance.now() - lastScore.current.at < 220) return
     try {
       const verdict = await api.benchScore(text)
-      waitMs = verdict.threshold_ms
-      setEndpointMs(waitMs)
+      lastScore.current = { at: performance.now(), ms: verdict.threshold_ms }
+      setEndpointMs(verdict.threshold_ms)
     } catch {
-      /* fall back to the fixed threshold this project exists to improve on */
+      /* keep the previous threshold; the fixed fallback is what this project improves on */
     }
-    silenceTimer.current = window.setTimeout(() => {
-      // Only fire if nothing new arrived while we waited. Anything else means the caller is
-      // still going, which is exactly what the extra patience was bought for.
-      if (lastPartial.current === text) send(text)
-    }, waitMs)
-  }, [send])
+  }, [])
 
   const start = useCallback(async () => {
     if (!agentId) return
@@ -123,7 +138,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     try {
       const { call_id, greeting } = await api.startCall(agentId, voiceOn ? 'voice' : 'text')
       setLines([{ who: 'agent', text: greeting }])
-      if (voiceOn) speak(greeting, { voice: agent?.voice })
+      if (voiceOn) speak(greeting, { voice: agent?.voice, onStart: () => setAgentSpeaking(true), onEnd: () => setAgentSpeaking(false) })
 
       socket.current = openCall(call_id, (event) => {
         const type = event.type as string
@@ -157,7 +172,13 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
             }
             return last?.who === 'agent' && last.streaming ? [...c.slice(0, -1), finished] : [...c, finished]
           })
-          if (voiceOn) speak(String(event.spoken ?? event.agent ?? ''), { voice: agent?.voice })
+          if (voiceOn) {
+            speak(String(event.spoken ?? event.agent ?? ''), {
+              voice: agent?.voice,
+              onStart: () => setAgentSpeaking(true),
+              onEnd: () => setAgentSpeaking(false),
+            })
+          }
         }
         if (type === 'summary') { setSummary(event); setPhase('ended') }
         if (type === 'ended') setPhase('ended')
@@ -176,6 +197,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     meter.current?.stop()
     setMicOn(false)
     stopSpeaking()
+    setAgentSpeaking(false)
     setPhase('ended')
   }, [])
 
@@ -191,16 +213,60 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     }
     listener.current = new Listener({
       onPartial: (text) => {
+        // New words are proof of speech, independent of the level meter. Microphone gain varies
+        // enormously between machines, and a level threshold tuned on one laptop is wrong on the
+        // next; this makes the silence detector robust to that without needing calibration.
+        if (text !== lastPartial.current) {
+          lastVoiceAt.current = performance.now()
+          speechSeen.current = true
+        }
         lastPartial.current = text
         setPartial(text)
-        void armEndpoint(text)
+        void rescore(text)
       },
     })
     listener.current.start()
+
     meter.current = new MicLevel()
-    void meter.current.start(setLevel)
+    void meter.current.start((value) => {
+      setLevel(value)
+      // Voice activity. The floor is well above room noise and well below speech; a laptop
+      // microphone in a quiet room idles around 0.02.
+      if (value > 0.08) {
+        lastVoiceAt.current = performance.now()
+        speechSeen.current = true
+      }
+    })
     setMicOn(true)
-  }, [micOn, armEndpoint])
+  }, [micOn, rescore])
+
+  /* THE SILENCE LOOP.
+   *
+   * Runs every 60ms while the microphone is on, and is the only thing that ends a turn. Three
+   * conditions, all required:
+   *
+   *   there is something to send        an empty transcript is not a turn
+   *   the caller has actually spoken    otherwise room noise alone would fire it
+   *   the microphone has been quiet     for as long as this sentence has earned
+   *
+   * Nothing here watches the transcript for changes, which is what the previous version did and
+   * why it interrupted people: a recogniser that pauses to think looks identical to a caller who
+   * has finished.
+   */
+  useEffect(() => {
+    if (!micOn || phase !== 'live') return
+    const timer = window.setInterval(() => {
+      const text = lastPartial.current.trim()
+      if (!text || !speechSeen.current || agentSpeaking) return
+      const quietFor = performance.now() - lastVoiceAt.current
+      setSilenceMs(quietFor)
+      if (quietFor >= lastScore.current.ms) {
+        speechSeen.current = false
+        send(text)
+      }
+    }, 60)
+    return () => window.clearInterval(timer)
+  }, [micOn, phase, agentSpeaking, send])
 
   const live = phase === 'live'
 
@@ -273,7 +339,12 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
                 <div>
                   <div className="msg" style={{ opacity: 0.6 }}>{partial}<i className="caret" /></div>
                   {endpointMs !== null && (
-                    <div className="msg-meta">waiting {endpointMs}ms for you to finish</div>
+                    <div className="msg-meta">
+                      <span>waiting up to {endpointMs}ms</span>
+                      <span style={{ color: silenceMs > endpointMs * 0.6 ? 'var(--cost)' : 'var(--text-3)' }}>
+                        quiet for {Math.round(silenceMs)}ms
+                      </span>
+                    </div>
                   )}
                 </div>
               </div>
@@ -297,7 +368,13 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
                 </div>
               )}
 
-              {micOn && (
+              {micOn && agentSpeaking && (
+                <span className="chip" data-t="agent" style={{ flexShrink: 0 }}>
+                  <Icon name="volume" size={11} /> agent speaking — mic paused
+                </span>
+              )}
+
+              {micOn && !agentSpeaking && (
                 <div className="level" aria-hidden>
                   {Array.from({ length: 12 }, (_, i) => (
                     <i key={i} style={{ height: `${Math.max(3, Math.min(22, level * 26 * (1 - Math.abs(i - 5.5) / 9)))}px` }} />

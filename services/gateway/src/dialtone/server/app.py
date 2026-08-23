@@ -357,9 +357,16 @@ async def call_socket(socket: WebSocket, call_id: str) -> None:
         log.debug("caller disconnected from %s", call_id)
     finally:
         record = p.end_call(call_id, outcome="completed")
-        with suppress(RuntimeError):
+        # The socket may already be closing -- the caller hung up, the tab closed, the network
+        # went. Sending into it then raises from deep inside the websockets library and surfaces
+        # as "Exception in ASGI application", which looks like a server fault and is not one.
+        # Ending a call must never be able to fail; the record is already written by this point.
+        try:
             if record:
                 await socket.send_json({"type": "summary", **_call_summary(record)})
+        except Exception:  # noqa: BLE001 -- the connection is gone; there is nothing to report to
+            log.debug("could not deliver the summary for %s; caller already gone", call_id)
+        with suppress(Exception):
             await socket.close()
 
 
