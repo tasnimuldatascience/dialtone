@@ -34,6 +34,7 @@ from .brain.conversation import AgentConfig, Conversation
 from .brain.knowledge import KnowledgeBase
 from .brain.llm import Brain, LocalBrain, ScriptedBrain
 from .flow.graph import Edge, Flow, Node, NodeKind
+from .speech.tts import Synthesizer
 from .store.db import Store
 
 log = logging.getLogger("dialtone.platform")
@@ -66,6 +67,9 @@ class Platform:
             )
         )
         self.knowledge: dict[str, KnowledgeBase] = {}
+        #: Neural voice. Shares the process with the language model rather than running as a
+        #: separate service: it is 330MB and CPU-bound, so it costs nothing the GPU wanted.
+        self.voice = Synthesizer()
         self.calls: dict[str, LiveCall] = {}
         self.status = "starting"
         self.warm_seconds = 0.0
@@ -83,6 +87,9 @@ class Platform:
                 # Off the event loop: loading weights is several seconds of blocking work and
                 # the health endpoint should stay answerable throughout.
                 await asyncio.to_thread(self.brain.load)
+
+            if self.voice.available:
+                await asyncio.to_thread(self.voice.load)
 
             if not self.store.list_agents():
                 self._seed()

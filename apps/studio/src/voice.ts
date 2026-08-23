@@ -330,3 +330,102 @@ export class MicLevel {
     this.stream = null
   }
 }
+
+// ── neural voice, streamed from the gateway ─────────────────────────────────
+/**
+ * Plays synthesised audio chunks in order, without gaps.
+ *
+ * WHY NOT AN <audio> ELEMENT PER CHUNK. Chunks arrive as separate WAV files and have to sound
+ * like one continuous sentence. Chaining `<audio>` elements on `ended` leaves an audible seam of
+ * tens of milliseconds at every join — enough to hear, and it lands mid-word. Web Audio lets each
+ * buffer be scheduled at an exact time on the audio clock, so the next chunk starts on the sample
+ * the previous one ends.
+ *
+ * The queue also has to tolerate chunks arriving SLOWER than they play. Synthesis runs at about
+ * twice real time so that should never happen, but "should never" on a live call means the
+ * schedule pointer is checked against the clock every time rather than assumed.
+ */
+export class AudioQueue {
+  private context: AudioContext | null = null
+  private playAt = 0
+  private active = new Set<AudioBufferSourceNode>()
+  private onIdle?: () => void
+  private pending = 0
+
+  constructor(onIdle?: () => void) {
+    this.onIdle = onIdle
+  }
+
+  private ensure(): AudioContext {
+    if (!this.context) {
+      const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+      this.context = new Ctor()
+    }
+    // Browsers suspend the context until a user gesture. A call always starts with a click, so
+    // resuming here is enough and does not need its own prompt.
+    if (this.context.state === 'suspended') void this.context.resume()
+    return this.context
+  }
+
+  /** Queue one base64 WAV chunk. Resolves once it has been scheduled, not once it has played. */
+  async push(base64Wav: string): Promise<void> {
+    const context = this.ensure()
+    const bytes = Uint8Array.from(atob(base64Wav), (c) => c.charCodeAt(0))
+    const buffer = await context.decodeAudioData(bytes.buffer)
+
+    const source = context.createBufferSource()
+    source.buffer = buffer
+    source.connect(context.destination)
+
+    // If the queue has drained, start now; otherwise start exactly when the previous chunk
+    // finishes. Comparing against the live clock is what prevents a late chunk from being
+    // scheduled in the past, which plays it instantly and overlaps the one before it.
+    const now = context.currentTime
+    const startAt = Math.max(now, this.playAt)
+    source.start(startAt)
+    this.playAt = startAt + buffer.duration
+
+    this.pending += 1
+    this.active.add(source)
+    source.onended = () => {
+      this.active.delete(source)
+      this.pending -= 1
+      if (this.pending === 0) this.onIdle?.()
+    }
+  }
+
+  /** Stop everything immediately. Used when the caller interrupts or hangs up. */
+  stop(): void {
+    for (const source of this.active) {
+      try {
+        source.stop()
+      } catch {
+        /* already finished */
+      }
+    }
+    this.active.clear()
+    this.pending = 0
+    this.playAt = 0
+    agentSpeaking = false
+  }
+
+  get playing(): boolean {
+    return this.pending > 0
+  }
+
+  /** Mark the agent as speaking for as long as audio is queued, so the mic stays muted. */
+  markSpeaking(): void {
+    agentSpeaking = true
+  }
+
+  markDone(): void {
+    // Same tail as the browser path: the speakers are still settling when the buffer ends.
+    window.setTimeout(() => { agentSpeaking = false }, 250)
+  }
+
+  close(): void {
+    this.stop()
+    void this.context?.close()
+    this.context = null
+  }
+}

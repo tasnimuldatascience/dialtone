@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ViewProps } from '../App'
 import { api, openCall, type Grounding, type Hit, type Timing } from '../api'
 import { Icon } from '../components/Icon'
-import { Listener, MicLevel, loadVoices, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
+import { AudioQueue, Listener, MicLevel, loadVoices, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
 
 /* Talking to the agent, by typing or by voice.
  *
@@ -44,6 +44,8 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   const [summary, setSummary] = useState<Record<string, unknown> | null>(null)
   const [agentSpeaking, setAgentSpeaking] = useState(false)
   const [silenceMs, setSilenceMs] = useState(0)
+  const [voiceEngine, setVoiceEngine] = useState<'kokoro-82m' | 'browser'>('browser')
+  const [firstAudioMs, setFirstAudioMs] = useState<number | null>(null)
 
   const socket = useRef<ReturnType<typeof openCall> | null>(null)
   const listener = useRef<Listener | null>(null)
@@ -56,6 +58,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   // `firstToken` was at that moment, so reading the state inside it measured the previous turn --
   // which is how "to first word" came out LARGER than the whole turn it belonged to.
   const firstTokenAt = useRef<number | null>(null)
+  const audio = useRef<AudioQueue | null>(null)
   // Last threshold the gateway gave us, and when. Speech recognition emits a partial per word,
   // so scoring every one meant a network round trip per syllable -- several a second, each one
   // delaying the timer it was supposed to be arming.
@@ -73,6 +76,23 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   const speechSeen = useRef(false)
 
   useEffect(() => { void loadVoices() }, [])
+
+  // Which voice engine is actually available. The neural one is better and needs the gateway;
+  // the browser one always works. Reported rather than assumed, so the UI can say which you are
+  // hearing instead of leaving you to guess why it sounds different.
+  useEffect(() => {
+    api.health()
+      .then((h) => setVoiceEngine(h.voice?.ready ? 'kokoro-82m' : 'browser'))
+      .catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
+    audio.current = new AudioQueue(() => {
+      audio.current?.markDone()
+      setAgentSpeaking(false)
+    })
+    return () => audio.current?.close()
+  }, [])
 
   // Scroll the transcript container, never the document: scrollIntoView walks up to the page and
   // yanks the whole layout down as tokens arrive.
@@ -138,7 +158,13 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     try {
       const { call_id, greeting } = await api.startCall(agentId, voiceOn ? 'voice' : 'text')
       setLines([{ who: 'agent', text: greeting }])
-      if (voiceOn) speak(greeting, { voice: agent?.voice, onStart: () => setAgentSpeaking(true), onEnd: () => setAgentSpeaking(false) })
+      if (voiceOn && voiceEngine === 'browser') {
+        speak(greeting, {
+          voice: agent?.voice,
+          onStart: () => setAgentSpeaking(true),
+          onEnd: () => setAgentSpeaking(false),
+        })
+      }
 
       socket.current = openCall(call_id, (event) => {
         const type = event.type as string
@@ -172,13 +198,29 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
             }
             return last?.who === 'agent' && last.streaming ? [...c.slice(0, -1), finished] : [...c, finished]
           })
-          if (voiceOn) {
+          // Only speak here when the gateway is NOT sending audio. With the neural engine the
+          // reply arrives as `audio` chunks instead, and doing both would have the agent say
+          // every sentence twice in two different voices.
+          if (voiceOn && voiceEngine === 'browser') {
             speak(String(event.spoken ?? event.agent ?? ''), {
               voice: agent?.voice,
               onStart: () => setAgentSpeaking(true),
               onEnd: () => setAgentSpeaking(false),
             })
           }
+        }
+        if (type === 'audio') {
+          const first = event.first_audio_ms as number | null
+          if (first != null) {
+            setFirstAudioMs(Math.round(first))
+            audio.current?.markSpeaking()
+            setAgentSpeaking(true)
+          }
+          void audio.current?.push(String(event.wav))
+        }
+        if (type === 'audio_failed') {
+          // Fall back to the browser's own voice rather than going silent. Worse, and audible.
+          setVoiceEngine('browser')
         }
         if (type === 'summary') { setSummary(event); setPhase('ended') }
         if (type === 'ended') setPhase('ended')
@@ -189,7 +231,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
       setLines([{ who: 'agent', text: `Could not start the call: ${String(error)}` }])
       setPhase('idle')
     }
-  }, [agentId, agent, voiceOn])
+  }, [agentId, agent, voiceOn, voiceEngine])
 
   const hangup = useCallback(() => {
     socket.current?.hangup()
@@ -197,6 +239,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     meter.current?.stop()
     setMicOn(false)
     stopSpeaking()
+    audio.current?.stop()
     setAgentSpeaking(false)
     setPhase('ended')
   }, [])
@@ -289,6 +332,15 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
             <input type="checkbox" checked={voiceOn} onChange={(e) => setVoiceOn(e.target.checked)} disabled={live} />
             Speak replies
           </label>
+
+          {voiceOn && (
+            <span className="chip" data-t={voiceEngine === 'kokoro-82m' ? 'agent' : undefined}
+                  title={voiceEngine === 'kokoro-82m'
+                    ? 'Kokoro-82M running locally — streamed clause by clause'
+                    : 'The browser built-in voice. The neural engine is not loaded.'}>
+              {voiceEngine === 'kokoro-82m' ? 'neural voice' : 'browser voice'}
+            </span>
+          )}
 
           {live && (
             <span className="chip" data-t="bad">
@@ -402,7 +454,10 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
           </div>
         </div>
 
-        <SidePanel lines={lines} summary={summary} firstToken={firstToken} voiceOn={voiceOn} />
+        <SidePanel
+          lines={lines} summary={summary} firstToken={firstToken}
+          firstAudioMs={firstAudioMs} voiceOn={voiceOn} voiceEngine={voiceEngine}
+        />
       </div>
     </div>
   )
@@ -464,8 +519,15 @@ const STAGES: { key: keyof Timing; label: string; colour: string }[] = [
 ]
 
 function SidePanel({
-  lines, summary, firstToken, voiceOn,
-}: { lines: Line[]; summary: Record<string, unknown> | null; firstToken: number | null; voiceOn: boolean }) {
+  lines, summary, firstToken, firstAudioMs, voiceOn, voiceEngine,
+}: {
+  lines: Line[]
+  summary: Record<string, unknown> | null
+  firstToken: number | null
+  firstAudioMs: number | null
+  voiceOn: boolean
+  voiceEngine: 'kokoro-82m' | 'browser'
+}) {
   const timed = lines.filter((l) => l.timing)
   const last = timed[timed.length - 1]?.timing
   const totals = timed.map((l) => l.timing!.total_ms).sort((a, b) => a - b)
@@ -495,6 +557,11 @@ function SidePanel({
               </div>
               <div style={{ marginTop: 12 }}>
                 <div className="stat-line"><span>Total</span><span>{Math.round(last.total_ms)}ms</span></div>
+                {firstAudioMs !== null && (
+                  <div className="stat-line" title="Silence before the caller heard anything at all">
+                    <span>To first audio</span><span>{firstAudioMs}ms</span>
+                  </div>
+                )}
                 {firstToken !== null && (
                   <div className="stat-line" title="Measured in the browser, so it includes the network hop the server-side total does not">
                     <span>To first word (round trip)</span><span>{firstToken}ms</span>
@@ -548,9 +615,15 @@ function SidePanel({
         </div>
       )}
 
-      {voiceOn && !synthSupported() && (
+      {voiceOn && voiceEngine === 'browser' && !synthSupported() && (
         <div className="note" data-t="warn">
-          This browser cannot speak. Chrome or Edge can.
+          This browser cannot speak, and the neural voice is not loaded.
+        </div>
+      )}
+      {voiceOn && voiceEngine === 'browser' && synthSupported() && (
+        <div className="note" data-t="warn">
+          <b>Using the browser's built-in voice.</b> It is robotic. The neural voice needs the
+          Kokoro model in <code>services/gateway/models</code>.
         </div>
       )}
       {!speechSupported() && (

@@ -144,7 +144,11 @@ def speakable(text: str) -> str:
             said += f" {number_to_words(pennies)} {sub_single if pennies == 1 else sub_plural}"
         return said
 
-    out = re.sub(r"([£$€])\s?([\d,]+)(?:\.(\d{1,2}))?", money, out)
+    # The digit group must not be able to end on a comma. `[\d,]+` matched "45," in "£45, which
+    # includes...", swallowing the comma along with the amount -- which removed a clause boundary
+    # the synthesiser splits on and flattened the intonation. Thousands separators still work:
+    # a comma only counts when three digits follow it.
+    out = re.sub(r"([£$€])\s?(\d{1,3}(?:,\d{3})*|\d+)(?:\.(\d{1,2}))?", money, out)
 
     # ── times ─────────────────────────────────────────────────────────────
     out = re.sub(

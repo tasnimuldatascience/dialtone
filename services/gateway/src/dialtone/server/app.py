@@ -20,6 +20,7 @@ against.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import time
 from contextlib import asynccontextmanager, suppress
@@ -88,6 +89,11 @@ def health() -> dict[str, Any]:
         "model": getattr(p.brain, "model_name", "scripted"),
         "warm_seconds": round(p.warm_seconds, 1),
         "live_calls": len(p.calls),
+        "voice": {
+            "engine": "kokoro-82m" if p.voice.ready else "browser",
+            "ready": p.voice.ready,
+            "available": p.voice.available,
+        },
     }
 
 
@@ -348,6 +354,8 @@ async def call_socket(socket: WebSocket, call_id: str) -> None:
                 await socket.send_json(event)
                 if event["type"] == "done":
                     p.store.add_turn(call_id, len(live.conversation.turns) - 1, event)
+                    if live.channel == "voice" and p.voice.ready:
+                        await _stream_voice(socket, p, live, str(event.get("spoken") or ""))
 
             if live.conversation.ended:
                 await socket.send_json({"type": "ended", "reason": "the flow reached an end"})
@@ -368,6 +376,41 @@ async def call_socket(socket: WebSocket, call_id: str) -> None:
             log.debug("could not deliver the summary for %s; caller already gone", call_id)
         with suppress(Exception):
             await socket.close()
+
+
+async def _stream_voice(socket: WebSocket, p: Platform, live: Any, text: str) -> None:
+    """Synthesise the reply and send it down the socket, chunk by chunk.
+
+    Chunks rather than one file, because the first one is what the caller waits for. Sending a
+    finished WAV would mean waiting for the whole reply to synthesise -- about half its spoken
+    duration -- and would undo the streaming the rest of this pipeline is built around.
+
+    Base64 over the existing JSON socket rather than a second binary channel: a reply is a
+    handful of chunks of tens of kilobytes, and the 33% encoding overhead on a localhost socket
+    costs less than the complexity of a second transport.
+    """
+    if not text.strip():
+        return
+    started = time.perf_counter()
+    try:
+        async for clip in p.voice.speak(text, voice=live.conversation.config.voice):
+            await socket.send_json({
+                "type": "audio",
+                "index": clip.index,
+                "text": clip.text,
+                "wav": base64.b64encode(clip.wav).decode("ascii"),
+                "duration_ms": round(clip.duration_ms, 1),
+                "generate_ms": round(clip.generate_ms, 1),
+                # Only meaningful on the first chunk, and it is the number that matters: how long
+                # the caller sat in silence before hearing anything at all.
+                "first_audio_ms": round((time.perf_counter() - started) * 1000, 1)
+                if clip.index == 0 else None,
+            })
+    except WebSocketDisconnect:
+        raise
+    except Exception:  # noqa: BLE001 -- a voice failure must not end the call
+        log.exception("synthesis failed on %s", live.call_id)
+        await socket.send_json({"type": "audio_failed"})
 
 
 def _call_summary(record: dict[str, Any]) -> dict[str, Any]:
@@ -491,6 +534,39 @@ def benchmark_score(text: str) -> dict[str, Any]:
 
 
 # ── tools and the simulator ──────────────────────────────────────────────────
+class SpeakIn(BaseModel):
+    text: str
+    voice: str = "female-warm"
+
+
+@app.post("/api/voice/preview")
+async def voice_preview(body: SpeakIn) -> dict[str, Any]:
+    """One WAV for the whole text. For auditioning a voice, never for a live call."""
+    p = P()
+    if not p.voice.ready:
+        raise HTTPException(503, "the voice engine is not loaded")
+    clip = await p.voice.speak_once(body.text[:400], voice=body.voice)
+    if clip is None:
+        raise HTTPException(503, "synthesis failed")
+    return {
+        "wav": base64.b64encode(clip.wav).decode("ascii"),
+        "duration_ms": round(clip.duration_ms, 1),
+        "generate_ms": round(clip.generate_ms, 1),
+    }
+
+
+@app.get("/api/voice/voices")
+def list_voices() -> dict[str, Any]:
+    from ..speech.tts import VOICES
+
+    p = P()
+    return {
+        "engine": "kokoro-82m" if p.voice.ready else "browser",
+        "ready": p.voice.ready,
+        "voices": [{"id": k, "kokoro": v[0], "lang": v[1]} for k, v in VOICES.items()],
+    }
+
+
 @app.get("/api/tools")
 def get_tools() -> dict[str, Any]:
     registry = build_registry()

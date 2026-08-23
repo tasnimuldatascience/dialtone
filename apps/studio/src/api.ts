@@ -11,6 +11,7 @@ export interface Health {
   warm_seconds: number
   live_calls: number
   version: string
+  voice?: { engine: 'kokoro-82m' | 'browser'; ready: boolean; available: boolean }
 }
 
 export interface Overview {

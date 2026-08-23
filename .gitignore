@@ -30,3 +30,7 @@ apps/*/.vite/
 *.db
 *.db-wal
 *.db-shm
+
+# TTS model weights (330MB) — downloaded by scripts/get-voice.sh
+services/gateway/models/*.onnx
+services/gateway/models/*.bin
