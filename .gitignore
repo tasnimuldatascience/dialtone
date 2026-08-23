@@ -25,3 +25,8 @@ apps/*/.vite/
 .env.local
 *.log
 .DS_Store
+
+# Local database and model cache
+*.db
+*.db-wal
+*.db-shm
