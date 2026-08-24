@@ -218,7 +218,11 @@ def parse_when(text: str, today: date) -> When:
         when.day = today
     else:
         for name, index in _WEEKDAYS.items():
-            if name in lowered:
+            # WORD BOUNDARIES, so "thursdays" does not match "thursday". The plural is a question
+            # about the practice -- "are you open on thursdays?" -- and reading it as a request
+            # for a date put a day the caller never asked for into the booking, which then
+            # showed up on screen as what they wanted.
+            if re.search(rf"\b{name}\b", lowered):
                 ahead = (index - today.weekday()) % 7
                 # "Monday" said on a Monday means next Monday, unless they said "this".
                 if ahead == 0:

@@ -28,6 +28,8 @@ dialtone measures both, and publishes the trade-off.
 
 Everything runs on your own machine. No API keys, no GPU, nothing paid.
 
+![The dashboard](docs/img/dashboard.png)
+
 ---
 
 ## The problem, in one example
@@ -415,7 +417,7 @@ caller has no idea what it is talking about.
 
 **dialtone saves what the caller heard, not what the AI wrote.**
 
-![The call monitor](docs/img/monitor.png)
+![A live call](docs/img/monitor.png)
 
 This works on the live call in the browser, and getting it there was harder than the idea. There
 are two microphone streams on the page and only one can be trusted while the agent is talking:

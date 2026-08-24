@@ -4,6 +4,12 @@
  * number, a populated table, a finished stream — rather than on a timeout. A timeout-based
  * screenshot script produces a different image on every machine, and the first symptom is a
  * README full of empty panels that looked fine locally.
+ *
+ * IT ALSO HAS TO BE RUN. A previous version of this file navigated to a "Call monitor" screen
+ * and clicked ".node-card", neither of which had existed for two redesigns — so the README was
+ * illustrated with a product nobody could open any more, and nothing failed to say so. The
+ * screens are asserted by name here for that reason: if one is renamed, this stops rather than
+ * quietly capturing the wrong thing.
  */
 
 import { chromium } from 'playwright'
@@ -20,12 +26,17 @@ const VIEWPORT = { width: 1500, height: 1000 }
 
 async function main() {
   await mkdir(OUT, { recursive: true })
-  const browser = await chromium.launch()
-  const page = await browser.newPage({
+  const browser = await chromium.launch({
+    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
+           '--autoplay-policy=no-user-gesture-required'],
+  })
+  const context = await browser.newContext({
     viewport: VIEWPORT,
     deviceScaleFactor: 2,          // retina, so the README images stay sharp when scaled
     colorScheme: 'dark',
+    permissions: ['microphone'],
   })
+  const page = await context.newPage()
 
   const shot = async (name, fullPage = false) => {
     await page.screenshot({ path: `${OUT}/${name}.png`, fullPage })
@@ -33,67 +44,81 @@ async function main() {
   }
 
   const nav = async (label) => {
-    await page.getByRole('button', { name: label, exact: true }).click()
+    const button = page.getByRole('navigation').getByRole('button', { name: label, exact: true })
+    if (!(await button.count())) throw new Error(`no screen called ${label}`)
+    await button.click()
   }
 
   console.log('capturing:')
-
-  // ── benchmark ────────────────────────────────────────────────────────────
   await page.goto(BASE, { waitUntil: 'networkidle' })
-  // The chart only has content once the sweep resolves; circles are the last thing drawn.
-  await page.waitForSelector('svg circle', { timeout: 30_000 })
+
+  // ── dashboard ────────────────────────────────────────────────────────────
+  await nav('Dashboard')
+  await page.waitForFunction(() => document.querySelectorAll('.metric-v').length >= 4)
+  await page.waitForFunction(() => document.querySelectorAll('.chart-col').length >= 14)
+  await shot('dashboard')
+
+  // ── a live call, mid-conversation ────────────────────────────────────────
+  await nav('Live call')
+  await page.getByRole('tab', { name: 'Chat' }).click()
+  await page.getByRole('button', { name: /Start chat/ }).click()
+  await page.waitForFunction(() => document.querySelectorAll('.bubble').length >= 1)
+
+  for (const question of ['how much is a check-up?', 'are you open on thursdays?']) {
+    const before = await page.locator('.bubble').count()
+    await page.locator('textarea').fill(question)
+    await page.keyboard.press('Enter')
+    // Wait for the agent's reply to finish streaming, not merely to start.
+    await page.waitForFunction(
+      (n) => document.querySelectorAll('.bubble').length >= n + 2 &&
+             !document.querySelector('.bubble:last-child .caret'),
+      before, { timeout: 120_000 },
+    )
+  }
+  // The details panel is half the story on this screen; fill it so it is not all placeholders.
+  await page.locator('.field input').nth(0).fill('Sam Hassan')
+  await page.locator('.field input').nth(1).fill('(212) 555-0142')
+  await page.getByRole('button', { name: /Save details/ }).click()
+  await page.waitForSelector('.know[data-confirmed="true"]', { timeout: 15_000 })
+  await shot('monitor')
+
+  await page.getByRole('button', { name: /End chat/ }).click()
+
+  // ── turn-taking ──────────────────────────────────────────────────────────
+  await nav('Turn-taking')
   await page.waitForFunction(
-    () => document.querySelectorAll('tbody tr').length >= 5,
-    { timeout: 30_000 },
+    () => document.querySelectorAll('tbody tr').length >= 4, null, { timeout: 60_000 },
   )
   await shot('benchmark')
 
-  // ── call monitor: run a barge-in call to completion ──────────────────────
-  await nav('Call monitor')
-  await page.getByRole('button', { name: 'Caller interrupts mid-sentence' }).click()
-  await page.getByRole('button', { name: 'Replay call' }).click()
-  // Wait for the stream to finish AND the transcript panel to arrive. Screenshotting on the
-  // last event alone catches the page one render before the summary exists.
-  await page.waitForSelector('.tl-row[data-kind="barge_in"]', { timeout: 60_000 })
+  // The published corpus, further down the same screen.
   await page.waitForFunction(
-    () => document.body.innerText.includes('What the model sees next turn'),
-    { timeout: 60_000 },
-  )
-  await page.waitForTimeout(400)
-  await shot('monitor')
+    () => document.querySelectorAll('tbody tr').length > 20, null, { timeout: 60_000 },
+  ).catch(() => undefined)
+  await page.evaluate(() => {
+    const rows = document.querySelectorAll('tbody tr')
+    rows[rows.length - 1]?.scrollIntoView({ block: 'center' })
+  })
+  await page.waitForTimeout(500)
+  await shot('corpus')
 
-  // ── a call where a number is read aloud ──────────────────────────────────
-  await page.getByRole('button', { name: 'Caller reads a card number' }).click()
-  await page.getByRole('button', { name: 'Replay call' }).click()
-  await page.waitForFunction(
-    () => document.body.innerText.includes('Removed before anything stored it'),
-    { timeout: 60_000 },
-  )
-  await page.waitForTimeout(400)
-  await shot('monitor-redaction', true)
-
-  // ── flow ─────────────────────────────────────────────────────────────────
-  await nav('Flow')
-  await page.waitForSelector('.node-card', { timeout: 30_000 })
+  // ── the flow ─────────────────────────────────────────────────────────────
+  await nav('Conversation flow')
+  await page.waitForSelector('.node', { timeout: 30_000 })
   await shot('flow')
-  await page.getByRole('button', { name: /offer_slots/ }).click()
+
+  await page.locator('.node').filter({ hasText: 'offer_slots' }).first().click()
   await page.waitForFunction(
-    () => document.body.innerText.includes('what it may do'),
-    { timeout: 15_000 },
+    () => Boolean(document.querySelector('.node[data-sel="true"]')), null, { timeout: 15_000 },
   )
   await shot('flow-node', true)
 
-  // ── corpus ───────────────────────────────────────────────────────────────
-  await nav('Corpus')
-  await page.waitForFunction(
-    () => document.querySelectorAll('tbody tr').length > 20,
-    { timeout: 30_000 },
-  )
-  await shot('corpus')
-
   // ── compliance ───────────────────────────────────────────────────────────
   await nav('Compliance')
-  await page.waitForSelector('mark.strip', { timeout: 30_000 })
+  await page.waitForFunction(
+    () => document.body.innerText.includes('What the AI receives'), null, { timeout: 30_000 },
+  )
+  await page.waitForTimeout(600)
   await shot('compliance')
 
   await browser.close()

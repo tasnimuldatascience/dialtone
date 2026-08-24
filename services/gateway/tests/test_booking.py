@@ -135,6 +135,25 @@ class TestParsingWhen:
         assert parse_when("my number is 212 555 0142", MONDAY).hour is None
 
     @pytest.mark.parametrize("phrase", [
+        "are you open on thursdays?",
+        "how late on thursdays",
+        "do you do saturdays",
+        "are you open on tuesdays and thursdays?",
+    ])
+    def test_a_plural_weekday_is_a_question_not_a_request(self, phrase: str):
+        """SPOTTED IN A SCREENSHOT. The caller asked "are you open on thursdays?" and the panel
+        showing what the agent knew said "Wants: Thursday, August 27" -- a day they had never
+        asked for, on its way into a booking.
+
+        "On thursdays" is habitual: a question about the practice. "On thursday" is a date."""
+        assert parse_when(phrase, MONDAY).day is None
+
+    @pytest.mark.parametrize("phrase", ["can I come on thursday", "thursday please",
+                                        "this thursday", "next thursday"])
+    def test_a_singular_weekday_still_is_a_request(self, phrase: str):
+        assert parse_when(phrase, MONDAY).day is not None
+
+    @pytest.mark.parametrize("phrase", [
         "one more thing, do you do whitening?",
         "just one moment",
         "give me one second",

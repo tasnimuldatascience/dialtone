@@ -7,7 +7,7 @@ See the [repository README](../../README.md) for what this is and why, and
 
 ```bash
 pip install -e ".[serve,dev]"
-pytest                  # 127 tests
+pytest                  # 362 tests
 ruff check src tests
 dialtone --help
 ```
