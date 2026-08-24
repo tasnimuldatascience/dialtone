@@ -1,0 +1,9 @@
+# One convention, so a Windows edit does not read as a whole-file rewrite in review.
+# The repo was mixed: 44 files CRLF, 36 LF.
+* text=auto eol=lf
+
+# Binary, and must never be touched.
+*.png binary
+*.onnx binary
+*.bin binary
+*.db binary
