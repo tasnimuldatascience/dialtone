@@ -73,6 +73,50 @@ MIN_TERM_OVERLAP = 0.6
 #: because a passage can clear the gate and still rank last.
 MIN_SCORE = 0.05
 
+#: Words that appear in conversation without asking the documents anything: greetings,
+#: politeness, acknowledgements, and the function words that hold them together.
+#:
+#: Deliberately contains NO word that names a thing the practice does. "Open", "price", "book",
+#: "tooth", "morning", "parking" are all absent, so any query containing one is a real question
+#: however chatty the rest of it is.
+_SMALL_TALK = frozenset("""
+hi hey hello morning afternoon evening night good goodbye bye cheers ciao
+thanks thank thankyou ta please sorry excuse pardon welcome
+yes yeah yep yup no nope nah ok okay okey alright right sure certainly absolutely
+great perfect lovely brilliant fine nice cool wonderful excellent super amazing
+that this it its there here they them
+i i'm im me my you you're your youre we we're were us our he she his her
+a an the and or but so then well actually just really very much too also
+is are am was were be been being do does did doing done
+have has had having can could will would shall should may might must
+how what who whom whose which
+sound sounds sounded look looks looked seem seems feel feels
+going go goes went get gets got
+mm mmm hmm uh um er erm ah oh eh mhm mm-hmm mmhmm uh-huh uhhuh yep
+work works worked help helping helped
+all any some none more less
+one two three
+""".split())
+
+
+def is_small_talk(query: str) -> bool:
+    """True when a query asks the documents nothing.
+
+    WHY THIS EXISTS RATHER THAN A HIGHER THRESHOLD. Measured against the seed corpus, a real
+    question about where the practice is scored 0.457 and "hi how are you doing" scored 0.527.
+    The ranges OVERLAP, so no value of MIN_RELEVANCE separates them -- raising it silences
+    genuine questions and lowering it feeds the agent an irrelevant page to answer from.
+
+    They are trivially separable lexically, though: small talk is made entirely of words that
+    name nothing. So it is filtered here, and the threshold is left to do the job it can
+    actually do -- judging passages, not intent.
+    """
+    words = [w for w in re.findall(r"[a-z'-]+", query.lower()) if w]
+    if not words:
+        return True
+    return all(word in _SMALL_TALK for word in words)
+
+
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
 
@@ -307,6 +351,12 @@ class KnowledgeBase:
         to say "we have nothing on that" has to live here, not in the prompt.
         """
         if not self.chunks or not query.strip():
+            return []
+
+        # "Thanks very much" is not a question. Searching for it wastes an embedding and, worse,
+        # can clear the relevance gate against a chatty passage -- which hands the agent a page
+        # about emergencies to answer "hello" from.
+        if is_small_talk(query):
             return []
 
         query_vector = self._embed([query], is_query=True)[0]

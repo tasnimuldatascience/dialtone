@@ -143,6 +143,10 @@ class TurnRecord:
     #: them, which is what the model is told it said -- see Conversation.interrupted.
     interrupted: bool = False
     heard: str = ""
+    #: A template placeholder the model wrote, which was replaced before the caller heard it.
+    #: Surfaced rather than logged away: it means the knowledge base has a gap, and that is
+    #: something an operator can actually fix.
+    placeholder: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -152,6 +156,7 @@ class TurnRecord:
             "tools": self.tools, "redacted": self.redacted, "refused": self.refused,
             "grounding": self.grounding.as_dict(),
             "interrupted": self.interrupted, "heard": self.heard,
+            "placeholder": self.placeholder,
         }
 
 
@@ -400,6 +405,15 @@ class Conversation:
 
         reply, marker = split_marker(spoken)
         reply = _one_or_two_sentences(reply)
+
+        # A reply with a template placeholder in it must never reach a caller. Replaced whole
+        # rather than patched: "Northgate Dental is located at" with the bracket cut out is a
+        # sentence that stops mid-thought, which is not better.
+        placeholder = find_placeholder(reply)
+        if placeholder:
+            log.warning("placeholder %r in reply on %s", placeholder, self.call_id)
+            reply = _NO_ANSWER
+
         timing.mark("speak")
 
         # Check the reply's numbers against the passages the model was actually given -- not
@@ -473,6 +487,7 @@ class Conversation:
             node=node.id if node else "", moved_to=moved_to,
             citations=[_citation(h) for h in hits], tools=tool_records,
             redacted=removed, refused=refused, grounding=grounding,
+            placeholder=placeholder,
         )
         self.turns.append(record)
         yield {
@@ -624,6 +639,42 @@ def _arguments_for(spec: Any, state: Any) -> dict[str, Any]:
         return {}
     required = spec.parameters.get("required", []) if isinstance(spec.parameters, dict) else []
     return {key: state.collected[key] for key in required if key in state.collected}
+
+
+#: Text a model writes when it is filling in a form rather than answering a question.
+#: Square brackets and braces are the common shapes; the bare words are the ones that show up
+#: without any punctuation around them.
+_PLACEHOLDER = re.compile(
+    r"\[[^\]]{0,80}\]"                                  # [insert location]
+    r"|\{[^}]{0,80}\}"                                   # {address}
+    r"|\b(?:insert|enter|your|the)\s+\w+\s+here\b"      # insert address here
+    r"|\bTBD\b|\bTBC\b|\bXXX+\b|\bN/?A\b",           # TBD, XXX, N/A
+    re.IGNORECASE,
+)
+
+
+def find_placeholder(reply: str) -> str:
+    """The first template placeholder in a reply, or "".
+
+    WHY THIS IS CHECKED AT ALL. On a thirty-turn call the caller asked "where are you exactly?"
+    and the agent answered:
+
+        "Northgate Dental is located at [insert location], where we provide..."
+
+    The knowledge base has no address in it, so the model did what a model does with a gap in a
+    form: it wrote the shape of the answer. Down a phone line that is read out loud, bracket by
+    bracket, and it is the single most obviously broken thing this system can say.
+
+    The grounding check cannot catch it -- that verifies NUMBERS against retrieved passages, and
+    a placeholder has no number in it. So it is caught here, by shape.
+    """
+    match = _PLACEHOLDER.search(reply)
+    return match.group(0) if match else ""
+
+
+#: What to say instead. Honest about not knowing rather than inventing, which is the same rule
+#: the rest of the system follows for prices.
+_NO_ANSWER = "I don't have that to hand, but I can check and get back to you."
 
 
 def _one_or_two_sentences(text: str, limit: int = 2) -> str:

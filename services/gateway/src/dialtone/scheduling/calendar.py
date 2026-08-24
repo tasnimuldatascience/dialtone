@@ -240,16 +240,21 @@ def parse_when(text: str, today: date) -> When:
         hour = int(digits.group(1))
         minute = int(digits.group(2) or 0)
         meridiem = (digits.group(3) or "").lower()
-        when.hour, when.minute = _to_24h(hour, minute, meridiem, when.part)
+        if _is_a_time(lowered, digits, has_minute=bool(digits.group(2)),
+                      meridiem=meridiem, part=when.part):
+            when.hour, when.minute = _to_24h(hour, minute, meridiem, when.part)
     else:
         words = _WORD_TIME.search(lowered)
         if words:
             hour = _WORD_HOURS[words.group(1).lower()]
-            minute = {"thirty": 30, "fifteen": 15, "forty five": 45}.get(
-                (words.group(2) or "").lower(), 0
-            )
+            spoken_minute = (words.group(2) or "").lower()
+            minute = {"thirty": 30, "fifteen": 15, "forty five": 45}.get(spoken_minute, 0)
             meridiem = (words.group(3) or "").lower()
-            when.hour, when.minute = _to_24h(hour, minute, meridiem, when.part)
+            # "o'clock" lands in the minute group and is a time marker rather than a minute.
+            marks_a_time = bool(spoken_minute)
+            if _is_a_time(lowered, words, has_minute=marks_a_time,
+                          meridiem=meridiem, part=when.part):
+                when.hour, when.minute = _to_24h(hour, minute, meridiem, when.part)
 
     return when
 
@@ -258,6 +263,52 @@ def _looks_like_a_date(text: str, match: re.Match[str]) -> bool:
     """Guard against reading a phone number or a date as a time of day."""
     around = text[max(0, match.start() - 4): match.end() + 4]
     return "/" in around or "-" in around or len(match.group(1)) > 2
+
+
+#: Words that put a number in the position of a time. "at two", "around ten", "before nine".
+_TIME_PREPOSITIONS = frozenset(
+    "at about around by after before from until till past近".replace("近", "").split()
+)
+
+
+def _is_a_time(text: str, match: re.Match[str], *, has_minute: bool, meridiem: str,
+               part: str | None) -> bool:
+    """Is this number a time of day, or just a number in a sentence?
+
+    THIS EXISTS BECAUSE OF A REAL CALL. The caller finished with "one more thing — do you do
+    whitening?", the parser read "one" as one o'clock, and the appointment they had already
+    agreed for nine thirty in the morning silently became one in the afternoon. Thirty turns of
+    careful work undone by a figure of speech.
+
+    Numbers are ordinary words. "One moment", "give me a second", "I need 2 fillings", "two of
+    my teeth" — all of them contain a number and none of them is a time. So a bare number is
+    only read as one when something in the sentence puts it in that position:
+
+      a meridiem or o'clock   "at 10am", "four o'clock"
+      an explicit minute      "nine thirty", "ten fifteen"
+      a preposition before it "at two", "around ten", "before nine"
+      a part of day nearby    "tomorrow morning ... ten"
+      nothing after it        "four", "actually two" -- answering "what time?"
+
+    THE LAST ONE IS THE DISTINCTION THAT MATTERS. A number that ENDS the sentence is an answer; a
+    number followed by the thing it counts is a quantity. "One more thing", "one moment", "I need
+    2 fillings", "two of my teeth hurt" all put a noun after the number. "Four" and "actually
+    two" do not, and both are somebody answering a question about time.
+
+    Erring towards "not a time" is the safe direction: the caller is asked to say when, which
+    costs one turn. The other way silently rewrites an agreed appointment, and nobody finds out
+    until they turn up.
+    """
+    if meridiem or has_minute or part:
+        return True
+
+    before = text[: match.start()].strip().split()
+    if before and before[-1].strip(",.") in _TIME_PREPOSITIONS:
+        return True
+
+    # Nothing of substance after it.
+    after = text[match.end():].strip(" ,.!?-–—'\"")
+    return not after
 
 
 def _to_24h(hour: int, minute: int, meridiem: str, part: str | None) -> tuple[int, int]:

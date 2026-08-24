@@ -223,6 +223,26 @@ class Platform:
 
 
 SEED_DOCUMENTS: dict[str, str] = {
+    # ADDED AFTER A REAL CALL. Asked "where are you exactly?", the agent replied "Northgate
+    # Dental is located at [insert location]" -- because there was no address anywhere in here
+    # and a model with a gap in a form writes the shape of the answer. The placeholder guard in
+    # brain/conversation.py now stops that reaching a caller, but the actual fix for "the agent
+    # cannot answer this" is to give it the answer.
+    # DELIBERATELY NARROW. Parking, step-free access and buses are covered by "Parking and
+    # access" and are NOT repeated here. A first draft of this page duplicated all three and
+    # contradicted them -- a different street for the car park, different bus numbers -- which
+    # is the worst thing a knowledge base can contain: retrieval picks one, grounding verifies
+    # against it, and the agent states a wrong fact with complete confidence.
+    "Where we are": """
+Our address. Northgate Dental is located at 118 Northgate Avenue, New York, NY 10014. If you are
+asking where we are, where to find us, or how to get here, this is the page.
+
+We are on the first floor. The entrance is beside the pharmacy.
+
+Getting here by subway. The nearest station is Christopher Street, about four minutes' walk.
+
+Reception is on 212-555-0142. The emergency line is 212-555-0188.
+""",
     "Opening hours": """
 Northgate Dental is open Monday through Friday, eight thirty in the morning until six in the
 evening. We are closed on weekends and on federal holidays.

@@ -134,6 +134,36 @@ class TestParsingWhen:
     def test_a_phone_number_is_not_a_time(self):
         assert parse_when("my number is 212 555 0142", MONDAY).hour is None
 
+    @pytest.mark.parametrize("phrase", [
+        "one more thing, do you do whitening?",
+        "just one moment",
+        "give me one second",
+        "I need 2 fillings",
+        "two of my teeth hurt",
+        "one of my crowns came out",
+    ])
+    def test_a_number_in_a_sentence_is_not_a_time(self, phrase: str):
+        """FOUND ON A THIRTY-TURN CALL. The caller finished with "one more thing — do you do
+        whitening?", "one" was read as one o'clock, and the appointment they had already agreed
+        for nine thirty in the morning silently became one in the afternoon.
+
+        A number followed by the thing it counts is a quantity, not a time."""
+        assert parse_when(phrase, MONDAY).hour is None
+
+    @pytest.mark.parametrize("phrase,hour", [
+        ("four", 16),                  # answering "what time?" with one word
+        ("actually two", 14),          # a correction
+        ("maybe three", 15),
+        ("at two", 14),                # a preposition puts it in the position of a time
+        ("can I come at nine", 9),
+        ("how about ten", 10),
+        ("nine thirty works", 9),      # an explicit minute
+    ])
+    def test_a_number_that_is_a_time_still_is(self, phrase: str, hour: int):
+        """The other direction, which is what makes the guard above worth having: refusing every
+        bare number would mean a caller answering "four" is asked again."""
+        assert parse_when(phrase, MONDAY).hour == hour
+
 
 # ── memory ───────────────────────────────────────────────────────────────────
 class TestMemory:
