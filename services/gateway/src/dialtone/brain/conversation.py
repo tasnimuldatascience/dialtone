@@ -139,6 +139,10 @@ class TurnRecord:
     #: quotes a price the documents do not contain is the single most damaging thing this
     #: system can do, and it does not look like an error from anywhere else.
     grounding: Grounding = field(default_factory=Grounding)
+    #: Set when the caller talked over this reply. `heard` is the part that actually reached
+    #: them, which is what the model is told it said -- see Conversation.interrupted.
+    interrupted: bool = False
+    heard: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -147,6 +151,7 @@ class TurnRecord:
             "node": self.node, "moved_to": self.moved_to, "citations": self.citations,
             "tools": self.tools, "redacted": self.redacted, "refused": self.refused,
             "grounding": self.grounding.as_dict(),
+            "interrupted": self.interrupted, "heard": self.heard,
         }
 
 
@@ -474,6 +479,44 @@ class Conversation:
             "type": "done", **record.as_dict(), "ended": self.ended,
             "memory": self.memory.as_dict(), "booked": booked,
         }
+
+    def interrupted(self, heard: str) -> bool:
+        """The caller talked over the agent. Keep only what they actually heard.
+
+        THE POINT OF THE WHOLE FEATURE, and it is one line of state. The agent WROTE a sentence;
+        the caller only HEARD the part that played before they cut in:
+
+            written:  "I've got Tuesday at nine, Tuesday at ten thirty, Wednesday at noon..."
+            heard:    "I've got Tuesday at..."
+
+        Leave the written version in the history and the model believes it offered four times. Two
+        turns later it says "as I mentioned, Wednesday at noon" and the caller has no idea what it
+        is talking about -- which is worse than the interruption itself, because it is the moment
+        the caller stops believing the agent was listening.
+
+        WHY THE BROWSER DECIDES WHAT WAS HEARD. Only it has the audio clock. The server knows what
+        it sent, not what came out of a speaker, and the gap between those is exactly the thing
+        being measured. `turn/bargein.py` does the same job for the simulator, where the clock is
+        synthetic and the server owns it.
+
+        Returns whether anything was actually trimmed.
+        """
+        for index in range(len(self.history) - 1, -1, -1):
+            if self.history[index].role != "assistant":
+                continue
+            written = self.history[index].content
+            kept = heard.strip()
+            if len(kept) >= len(written.strip()):
+                # They cut in after it had finished, or close enough. Nothing to trim.
+                return False
+            # An ellipsis, so the model can see its own sentence was cut off rather than
+            # concluding it phrased something strangely.
+            self.history[index] = Turn("assistant", f"{kept}…" if kept else "…")
+            if self.turns:
+                self.turns[-1].interrupted = True
+                self.turns[-1].heard = kept
+            return True
+        return False
 
     def book_if_ready(self) -> dict[str, Any] | None:
         """Book, if and only if everything a booking needs is actually in hand.

@@ -431,6 +431,18 @@ async def call_socket(socket: WebSocket, call_id: str) -> None:
 
             if kind == "hangup":
                 break
+
+            if kind == "interrupt":
+                # The caller talked over the agent. The browser sends what actually came out of
+                # the speaker, because only it has the audio clock -- the server knows what it
+                # sent, and the gap between those two is the entire point.
+                heard = str(message.get("heard") or "")
+                trimmed = live.conversation.interrupted(heard)
+                await socket.send_json({
+                    "type": "interrupted", "heard": heard, "trimmed": trimmed,
+                })
+                continue
+
             if kind != "say":
                 continue
 

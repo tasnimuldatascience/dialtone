@@ -165,33 +165,37 @@ function Metric({ k, v, s, tone }: { k: string; v: string; s: string; tone: stri
 
 function DayChart({ days }: { days: { day: string; calls: number; resolved: number }[] }) {
   const peak = Math.max(1, ...days.map((d) => d.calls))
+  const total = days.reduce((n, d) => n + d.calls, 0)
+
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 132 }}>
-      {days.map((d) => (
-        // The column needs an explicit full height: the bar inside sizes itself as a percentage,
-        // and a percentage of an auto height is zero, which renders every bar as a flat line.
-        <div key={d.day} style={{ flex: 1, height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center', gap: 6 }}>
-          <div
-            title={`${d.day}: ${d.calls} calls, ${d.resolved} resolved`}
-            style={{
-              width: '100%',
-              height: `${(d.calls / peak) * 100}%`,
-              minHeight: 3,
-              background: 'var(--bg-3)',
-              borderRadius: '4px 4px 0 0',
-              display: 'flex',
-              flexDirection: 'column',
-              justifyContent: 'flex-end',
-              overflow: 'hidden',
-            }}
-          >
-            <div style={{ height: `${d.calls ? (d.resolved / d.calls) * 100 : 0}%`, background: 'var(--accent)' }} />
-          </div>
-          <div style={{ fontSize: 9.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>
-            {d.day.slice(8)}
-          </div>
-        </div>
-      ))}
+    <div>
+      <div className="chart">
+        {days.map((d) => {
+          const date = new Date(`${d.day}T00:00`)
+          const weekend = date.getDay() === 0 || date.getDay() === 6
+          const share = d.calls ? (d.resolved / d.calls) * 100 : 0
+          return (
+            <div className="chart-col" key={d.day} data-weekend={weekend || undefined}>
+              <div className="chart-n">{d.calls || ''}</div>
+              <div
+                className="chart-bar"
+                // The height is a percentage of the column, so the column needs an explicit one:
+                // a percentage of an auto height is zero, which renders every bar as a flat line.
+                style={{ height: `${Math.max((d.calls / peak) * 100, d.calls ? 6 : 1.5)}%` }}
+                title={`${date.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}\n${d.calls} calls, ${d.resolved} resolved`}
+              >
+                <i style={{ height: `${share}%` }} />
+              </div>
+              <div className="chart-d">{date.getDate()}</div>
+            </div>
+          )
+        })}
+      </div>
+      <div className="chart-key">
+        <span><i className="sw" style={{ background: 'var(--accent)' }} />resolved by the agent</span>
+        <span><i className="sw" style={{ background: 'var(--bg-3)' }} />passed to a person</span>
+        <span style={{ marginLeft: 'auto' }}>{total} in a fortnight</span>
+      </div>
     </div>
   )
 }

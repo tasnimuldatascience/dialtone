@@ -575,10 +575,27 @@ class Store:
             "avg_duration_ms": round(totals["avg_duration"] or 0),
             "median_turn_ms": _percentile(latencies, 0.5),
             "p90_turn_ms": _percentile(latencies, 0.9),
-            "by_day": [dict(r) for r in reversed(by_day)],
+            # Densified. The query returns only days that HAVE calls, so a quiet week produced a
+            # one-bar chart stretched across the whole panel -- which reads as "every call
+            # happened at once" rather than "there was one day of calls". A day with no calls is
+            # still a day, and the gap is the information.
+            "by_day": _dense_days([dict(r) for r in by_day], days=14),
             "sentiment": {r["sentiment"]: r["n"] for r in sentiment},
         }
 
+
+
+def _dense_days(rows: list[dict[str, Any]], *, days: int) -> list[dict[str, Any]]:
+    """A contiguous daily series ending today, zero-filled where nothing happened."""
+    from datetime import date, timedelta
+
+    found = {r["day"]: r for r in rows}
+    today = date.today()
+    out: list[dict[str, Any]] = []
+    for offset in range(days - 1, -1, -1):
+        key = (today - timedelta(days=offset)).isoformat()
+        out.append(found.get(key) or {"day": key, "calls": 0, "resolved": 0})
+    return out
 
 def _percentile(values: list[float], q: float) -> float:
     if not values:

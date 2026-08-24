@@ -327,6 +327,16 @@ export function openCall(
     say: (text: string) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'say', text }))
     },
+    /**
+     * The caller talked over the agent.
+     *
+     * `heard` is what actually came out of the speaker, not what was sent. Only the browser can
+     * know that — it owns the audio clock — and the difference between the two is the whole
+     * reason this message exists.
+     */
+    interrupt: (heard: string) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'interrupt', heard }))
+    },
     hangup: () => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'hangup' }))
     },

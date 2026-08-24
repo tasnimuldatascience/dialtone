@@ -4,6 +4,7 @@ import { api, openCall, type Booked, type CallMemory, type Grounding, type Hit, 
 import { Icon } from '../components/Icon'
 import { AudioQueue, Listener, MicLevel, clearSpokenMemory, inEchoWindow, loadVoices, looksLikeEcho, rememberSpoken, resetEchoWindow, setAgentAudioProbe, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
 import { decideTurn } from '../turntaking'
+import { trackBargeIn } from '../bargein'
 import { endsOnFiller, polish } from '../transcript'
 
 /* Talking to the agent, by typing or by voice.
@@ -46,6 +47,8 @@ interface Line {
   redacted?: string[]
   refused?: string
   tools?: { name: string; ok: boolean; ms: number }[]
+  /** The caller talked over this reply. Only the part that played was kept. */
+  interrupted?: boolean
 }
 
 type Phase = 'idle' | 'connecting' | 'live' | 'ended'
@@ -70,6 +73,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   const [agentSpeaking, setAgentSpeaking] = useState(false)
   const [silenceMs, setSilenceMs] = useState(0)
   const [turnReason, setTurnReason] = useState('')
+  const [interrupted, setInterrupted] = useState(false)
   const [voiceEngine, setVoiceEngine] = useState<'kokoro-82m' | 'browser'>('browser')
   const [firstAudioMs, setFirstAudioMs] = useState<number | null>(null)
 
@@ -117,6 +121,14 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   //: phrase from the beginning, so without this every fire re-sends everything said so far --
   //: which is how one spoken sentence became four turns and four replies.
   const sentSoFar = useRef('')
+  //: When the current run of loud microphone frames began, while the agent is speaking. Owned
+  //: here and passed through `trackBargeIn`, which is a pure function so it can be tested
+  //: against timing traces rather than a live microphone.
+  const loudSince = useRef(0)
+  //: Latched for the duration of one interruption. The level callback fires many times a second,
+  //: and without this a single interruption sends a burst of messages, each truncating the
+  //: agent's last turn to less than the one before.
+  const bargedIn = useRef(false)
 
   useEffect(() => { void loadVoices() }, [])
 
@@ -241,6 +253,42 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     meter.current = new MicLevel()
     void meter.current.start((value) => {
       setLevel(value)
+
+      /* BARGE-IN. Decided from THIS stream, which was opened with echo cancellation, and never
+       * from the transcript -- Web Speech opens its own stream that we cannot configure, so
+       * while the agent is talking its words are partly the agent's own. */
+      const barge = trackBargeIn({
+        agentAudible: audio.current?.isAudible(0) ?? false,
+        level: value,
+        now: performance.now(),
+        loudSince: loudSince.current,
+        alreadyInterrupted: bargedIn.current,
+      })
+      loudSince.current = barge.loudSince
+      if (barge.reason) setTurnReason(barge.reason)
+      if (barge.interrupt) {
+        bargedIn.current = true
+        // What the caller ACTUALLY heard, read off the audio clock, before the audio is stopped
+        // and that information is gone.
+        const heard = audio.current?.heardSoFar() ?? ''
+        audio.current?.stop()
+        // Believe the microphone again immediately. The guard exists because the recogniser
+        // reports what it heard several hundred milliseconds late, but the caller is talking RIGHT
+        // NOW and holding it shut for another 900ms would swallow the first half of what they
+        // said. The content check (`looksLikeEcho`) still catches the agent's own tail words.
+        resetEchoWindow()
+        setAgentSpeaking(false)
+        setInterrupted(true)
+        socket.current?.interrupt(heard)
+        // The recogniser's buffer is full of the agent. Clear it, or the caller's interruption
+        // arrives with the agent's half-sentence stuck to the front of it.
+        listener.current?.reset()
+        lastPartial.current = ''
+        sentSoFar.current = ''
+        setPartial('')
+        window.setTimeout(() => { bargedIn.current = false; setInterrupted(false) }, 1500)
+      }
+
       // Voice activity. The floor is well above room noise and well below speech; a laptop
       // microphone in a quiet room idles around 0.02.
       //
@@ -295,6 +343,8 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     clearSpokenMemory()
     resetEchoWindow()
     sentSoFar.current = ''
+    loudSince.current = 0
+    bargedIn.current = false
     try {
       const { call_id, greeting } = await api.startCall(agentId, voiceOn ? 'voice' : 'text')
       setCallId(call_id)
@@ -363,7 +413,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
           // Every chunk re-arms the mute and adds its words to the echo memory. Doing this only
           // on the first chunk left the guard expiring midway through a long reply.
           audio.current?.markSpeaking(String(event.text ?? ''))
-          void audio.current?.push(String(event.wav))
+          void audio.current?.push(String(event.wav), String(event.text ?? ''))
         }
         if (type === 'audio_failed') {
           // Fall back to the browser's own voice rather than going silent. Worse, and audible.
@@ -374,6 +424,15 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
         // which on a voice call is otherwise unanswerable until the booking is wrong.
         if (event.memory) setMemory(event.memory as unknown as CallMemory)
         if (type === 'booked') setBooked(event as unknown as Booked)
+        if (type === 'interrupted') {
+          // The gateway has trimmed its record of the reply to what actually played. Shown on
+          // screen too, because "why did it stop mid-sentence" is otherwise a mystery.
+          setLines((c) => {
+            const last = c[c.length - 1]
+            if (last?.who !== 'agent') return c
+            return [...c.slice(0, -1), { ...last, interrupted: true }]
+          })
+        }
         if (type === 'summary') { setSummary(event); setPhase('ended') }
         if (type === 'ended') setPhase('ended')
       }, () => setPhase('ended'))
@@ -455,7 +514,10 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     const timer = window.setInterval(() => {
       // Polled every 60ms, which is also what keeps the echo window's clock current.
       if (inEchoWindow()) {
-        setTurnReason('agent speaking — not listening')
+        // The TRANSCRIPT is not believed while the agent is audible — the recogniser's stream has
+        // no echo cancellation we control. Interrupting still works: that is decided from the
+        // level meter, which does. See bargein.ts.
+        setTurnReason('agent speaking — talk over it to interrupt')
         return
       }
 
@@ -650,9 +712,15 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
                 </span>
               )}
 
-              {micOn && agentSpeaking && (
+              {micOn && interrupted && (
+                <span className="chip" data-t="cost" style={{ flexShrink: 0 }}>
+                  <Icon name="mic" size={12} /> you interrupted
+                </span>
+              )}
+
+              {micOn && agentSpeaking && !interrupted && (
                 <span className="chip" data-t="agent" style={{ flexShrink: 0 }}>
-                  <Icon name="volume" size={11} /> agent speaking — mic paused
+                  <Icon name="volume" size={12} /> agent speaking — talk over it to interrupt
                 </span>
               )}
 
@@ -712,6 +780,12 @@ function Bubble({ line }: { line: Line }) {
           {line.text}
           {line.streaming && <i className="caret" />}
         </div>
+
+        {line.interrupted && (
+          <div className="msg-meta"><span style={{ color: 'var(--cost)' }}>
+            you interrupted — the agent only knows the part you heard
+          </span></div>
+        )}
 
         {line.redacted && line.redacted.length > 0 && (
           <div className="msg-meta"><span style={{ color: 'var(--bad)' }}>removed before storage: {line.redacted.join(', ')}</span></div>

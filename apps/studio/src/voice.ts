@@ -482,6 +482,11 @@ export class AudioQueue {
   private active = new Set<AudioBufferSourceNode>()
   private onIdle?: () => void
   private pending = 0
+  /* Every chunk, with the window of audio-clock time it occupies. This is what makes it
+   * possible to answer "what did the caller actually hear?" at the instant they cut in --
+   * which is a different question from "what did the agent write", and the difference is the
+   * whole reason barge-in is hard. */
+  private timeline: { text: string; startAt: number; endAt: number }[] = []
 
   constructor(onIdle?: () => void) {
     this.onIdle = onIdle
@@ -499,7 +504,7 @@ export class AudioQueue {
   }
 
   /** Queue one base64 WAV chunk. Resolves once it has been scheduled, not once it has played. */
-  async push(base64Wav: string): Promise<void> {
+  async push(base64Wav: string, text = ''): Promise<void> {
     const context = this.ensure()
     const bytes = Uint8Array.from(atob(base64Wav), (c) => c.charCodeAt(0))
     const buffer = await context.decodeAudioData(bytes.buffer)
@@ -515,6 +520,7 @@ export class AudioQueue {
     const startAt = Math.max(now, this.playAt)
     source.start(startAt)
     this.playAt = startAt + buffer.duration
+    this.timeline.push({ text, startAt, endAt: this.playAt })
 
     this.pending += 1
     this.active.add(source)
@@ -537,7 +543,42 @@ export class AudioQueue {
     this.active.clear()
     this.pending = 0
     this.playAt = 0
+    this.timeline = []
     agentSpeaking = false
+  }
+
+  /**
+   * The words that have actually reached the caller by now.
+   *
+   * Read from the audio clock, chunk by chunk. For the chunk still playing there is no word
+   * timing to consult -- the synthesiser does not emit one -- so it assumes an even speaking
+   * rate and takes that proportion of the words.
+   *
+   * DELIBERATELY PESSIMISTIC: it rounds DOWN, so a half-heard word counts as unheard. Erring
+   * this way makes the agent repeat something the caller just heard, which is mildly redundant.
+   * Erring the other way makes it refer back to a time it never managed to say, which is the
+   * failure that makes a caller think it is not listening.
+   */
+  heardSoFar(): string {
+    const context = this.context
+    if (!context) return ''
+    const now = context.currentTime
+    const parts: string[] = []
+
+    for (const chunk of this.timeline) {
+      if (now >= chunk.endAt) {
+        parts.push(chunk.text)
+        continue
+      }
+      if (now <= chunk.startAt) break
+
+      const span = chunk.endAt - chunk.startAt
+      const played = span > 0 ? (now - chunk.startAt) / span : 0
+      const words = chunk.text.split(/\s+/).filter(Boolean)
+      parts.push(words.slice(0, Math.floor(words.length * played)).join(' '))
+      break
+    }
+    return parts.join(' ').replace(/\s+/g, ' ').trim()
   }
 
   /**
