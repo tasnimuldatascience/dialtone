@@ -4,7 +4,7 @@
 
 **An AI phone agent that knows when you have finished talking.**
 
-[![tests](https://img.shields.io/badge/tests-255%20passing-4ade80?style=flat-square)](#run-it)
+[![tests](https://img.shields.io/badge/tests-329%20passing-4ade80?style=flat-square)](#run-it)
 [![python](https://img.shields.io/badge/python-3.12%2B-35e0d0?style=flat-square)](#run-it)
 [![typescript](https://img.shields.io/badge/typescript-5.6-35e0d0?style=flat-square)](#run-it)
 [![license](https://img.shields.io/badge/license-MIT-8ea0b5?style=flat-square)](LICENSE)
@@ -143,6 +143,140 @@ conflating the two is what made the microphone feel unpredictable.
 
 ---
 
+## How it fits together
+
+Two processes. The browser owns the microphone and the speaker; the gateway owns the model, the
+documents and the diary. Everything on a live call goes over one WebSocket, because voice needs
+both directions at once and because the first token has to reach the browser before the last one
+exists.
+
+```mermaid
+flowchart TB
+    subgraph browser["🖥️  apps/studio — the browser"]
+        direction TB
+        mic["Microphone<br/>Web Speech + level meter"]
+        turn["turntaking.ts<br/>decides the turn is over"]
+        pol["transcript.ts<br/>fillers out, punctuation in"]
+        spk["voice.ts<br/>gapless playback + echo guard"]
+        form["Your details<br/>name · phone · email, typed"]
+    end
+
+    subgraph gw["⚙️  services/gateway — FastAPI"]
+        direction TB
+        convo["brain/conversation.py<br/>one turn, start to finish"]
+        mem["brain/memory.py<br/>what the agent knows"]
+        cal["scheduling/calendar.py<br/>what is free"]
+        know["brain/knowledge.py<br/>BM25 + dense retrieval"]
+        ground["brain/grounding.py<br/>checks every number"]
+        ep["turn/endpointing.py<br/>how long to wait"]
+    end
+
+    subgraph local["📦  on your machine — no API keys"]
+        llm["Qwen2.5-1.5B<br/>streamed, token by token"]
+        tts["Kokoro-82M<br/>synthesised per clause"]
+        emb["bge-small-en-v1.5<br/>embeddings"]
+        db[("SQLite<br/>calls · documents<br/>appointments")]
+    end
+
+    mic --> turn
+    turn -->|"raw text<br/>(fillers kept)"| ep
+    turn -->|"polished text"| pol
+    pol ==>|"WebSocket: say"| convo
+    form -->|"PATCH /details"| mem
+
+    convo --> mem
+    convo --> cal
+    convo --> know
+    convo --> llm
+    llm --> ground
+    ground --> convo
+    know --> emb
+    know --> db
+    cal --> db
+    mem --> db
+
+    convo ==>|"tokens, then audio"| spk
+    convo -.->|"audio while still writing"| tts
+    tts -.-> spk
+    spk -.->|"mutes"| mic
+
+    classDef b fill:#0c1c14,stroke:#1e4030,color:#eaeef5
+    classDef g fill:#0a1524,stroke:#1e3555,color:#eaeef5
+    classDef l fill:#12102a,stroke:#322a52,color:#eaeef5
+    class mic,turn,pol,spk,form b
+    class convo,mem,cal,know,ground,ep g
+    class llm,tts,emb,db l
+```
+
+Three things in that picture are the whole project.
+
+**The raw transcript and the polished one go different ways.** The endpointer reads the raw text,
+because "um" is the strongest single signal that a caller has not finished. The agent reads the
+cleaned copy, because "um" is not a question. Sending one string to both is the obvious design
+and it is wrong in both directions at once.
+
+**Audio starts before the reply is finished.** The dashed line from the conversation to the
+synthesiser fires on the first completed clause, not on the last token. That is the difference
+between the caller waiting ~2 seconds and ~600ms.
+
+**The speaker mutes the microphone.** On open speakers the agent hears itself, transcribes it,
+and answers it. The guard asks the audio clock directly rather than trusting a flag, because
+flags go stale between chunks — which is how an earlier version ended up in conversation with
+itself.
+
+---
+
+## One turn, end to end
+
+What happens between you stopping talking and hearing an answer. The numbers are measured on a
+laptop CPU, and every one of them overlaps with the next — that is the point.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Caller
+    participant B as Browser
+    participant G as Gateway
+    participant M as Qwen2.5-1.5B
+    participant V as Kokoro
+
+    C->>B: "...how much is a check-up?"
+    Note over B: silence begins
+
+    B->>G: score the sentence so far
+    G-->>B: complete → wait 280ms<br/>(a fixed rule waits 700ms)
+    Note over B: 280ms of quiet, and the<br/>transcript has settled
+
+    B->>G: say("How much is a check-up?")
+
+    G->>G: strip card numbers before storage
+    G->>G: retrieve — BM25 + dense, gated at 0.54
+    G->>G: put memory, availability and today's<br/>date in front of the model as FACT
+    G->>M: stream
+
+    M-->>G: "A routine check-up costs"
+    G-->>B: token
+    Note over G,V: first complete clause →<br/>synthesise NOW, mid-generation
+    G->>V: speak("A routine check-up costs")
+    V-->>G: audio
+    G-->>B: audio chunk
+    B-->>C: 🔊 first words — the caller stops waiting
+
+    M-->>G: "...seventy-five dollars."
+    G->>G: verify every number against the<br/>passages actually retrieved
+    G->>V: speak the remaining clause
+    V-->>G: audio
+    G-->>B: audio chunk + done
+    B-->>C: 🔊 the rest
+
+    Note over B: microphone stays muted<br/>until the audio has played out
+```
+
+If any stage waited for the one before it to finish, the caller would sit in silence for the sum
+of all of them. [Where the time goes](#where-the-time-goes) has the measured numbers.
+
+---
+
 ## Run it
 
 You need Python 3.12+ and Node 20+. No API keys. No GPU. Nothing paid.
@@ -152,7 +286,7 @@ You need Python 3.12+ and Node 20+. No API keys. No GPU. Nothing paid.
 cd services/gateway
 pip install -e ".[serve,dev]"
 
-pytest                    # 204 tests
+pytest                    # 249 tests
 dialtone bench ablate     # see the results table
 dialtone serve            # starts on http://127.0.0.1:8071
 
@@ -322,6 +456,40 @@ which tools it is allowed to use.
 
 The AI still chooses its own words. The chart only controls what is **possible**.
 
+```mermaid
+flowchart LR
+    greet(["greet<br/>speak"])
+    reason["reason<br/>collect · why they rang"]
+    day["preferred_day<br/>collect · roughly when"]
+    slots{{"offer_slots<br/>tool · check_availability"}}
+    confirm["confirm<br/>collect · an explicit yes"]
+    book{{"book<br/>tool · book_appointment"}}
+    handoff[["handoff<br/>transfer to a person"]]
+    goodbye(["goodbye<br/>end"])
+
+    greet -->|wants an appointment| reason
+    greet -->|asks for a human| handoff
+    greet -->|no further business| goodbye
+    reason -->|you know what they need| day
+    reason -->|severe pain| handoff
+    day -->|any indication of timing| slots
+    slots -->|picked one| confirm
+    slots -->|none suit| day
+    slots -->|nothing after two tries| handoff
+    confirm -->|explicit yes| book
+    confirm -->|corrected the details| slots
+    book -->|booked| goodbye
+    book -->|slot went| slots
+    book -->|booking failed| handoff
+
+    classDef t fill:#1c1508,stroke:#46381c,color:#eaeef5
+    classDef h fill:#1c0f13,stroke:#46212b,color:#eaeef5
+    classDef e fill:#0c1c14,stroke:#1e4030,color:#eaeef5
+    class slots,book t
+    class handoff h
+    class greet,goodbye e
+```
+
 ```console
 $ dialtone flow show
 node           kind      collects       tools reachable here                 edges
@@ -333,7 +501,19 @@ confirm        collect   confirmed      —                                    2
 book           tool                     book_appointment, send_confirmation  3
 handoff        transfer                 —                                    0
 goodbye        end                      —                                    0
+
+paths (6):
+  greet → reason → preferred_day → offer_slots → confirm → book → goodbye
+  greet → reason → preferred_day → offer_slots → confirm → book → handoff
+  greet → reason → preferred_day → offer_slots → handoff
+  greet → reason → handoff
+  greet → handoff
+  greet → goodbye
 ```
+
+Every path is enumerated, so "what can this agent actually do?" has an answer you can read
+rather than a prompt you have to trust. `dialtone flow validate` fails the build on a node
+nothing reaches or a collect step with no way out.
 
 `book_appointment` exists at the `book` step and nowhere else. If the AI decides to book an
 appointment during the greeting, it cannot — the tool is not in the list it was given.
@@ -471,7 +651,7 @@ agents feel like a walkie-talkie.
 
 ## Tests
 
-204 in the gateway, 51 in the browser, plus two scripts that drive the whole thing for real.
+249 in the gateway, 80 in the browser, plus two scripts that drive the whole thing for real.
 Each is named after the problem it prevents, not the function it calls:
 
 ```
@@ -485,8 +665,8 @@ test_a_time_that_does_not_exist_is_refused_even_on_a_free_day
 ```
 
 ```bash
-cd services/gateway && pytest          # 204
-cd apps/studio      && npm test        # 51
+cd services/gateway && pytest          # 249
+cd apps/studio      && npm test        # 80
 npm run smoke                          # every screen, in Chromium, with a fake microphone
 python scripts/booking-e2e.py          # a real call, then a look in the database
 ```
