@@ -4,7 +4,7 @@
 
 **An AI phone agent that knows when you have finished talking.**
 
-[![tests](https://img.shields.io/badge/tests-329%20passing-4ade80?style=flat-square)](#run-it)
+[![tests](https://img.shields.io/badge/tests-450%20passing-4ade80?style=flat-square)](#run-it)
 [![python](https://img.shields.io/badge/python-3.12%2B-35e0d0?style=flat-square)](#run-it)
 [![typescript](https://img.shields.io/badge/typescript-5.6-35e0d0?style=flat-square)](#run-it)
 [![license](https://img.shields.io/badge/license-MIT-8ea0b5?style=flat-square)](LICENSE)
@@ -286,7 +286,7 @@ You need Python 3.12+ and Node 20+. No API keys. No GPU. Nothing paid.
 cd services/gateway
 pip install -e ".[serve,dev]"
 
-pytest                    # 249 tests
+pytest                    # 354 tests
 dialtone bench ablate     # see the results table
 dialtone serve            # starts on http://127.0.0.1:8071
 
@@ -361,6 +361,41 @@ checks, not from luckier settings.
 
 ---
 
+## Why the agent says "let me check that"
+
+It only answers from documents it was actually given, and deciding whether it HAS one is harder
+than it looks. Cosine scores for the seed corpus, `bge-small-en-v1.5`:
+
+| question | score | |
+|---|---:|---|
+| "how much is a check-up?" | 0.735 | in scope |
+| **"do you offer physiotherapy?"** | **0.582** | **out of scope** |
+| **"hi how are you doing"** | **0.527** | **not a question at all** |
+| "what is your street address?" | 0.520 | in scope |
+| "where are you exactly?" | 0.457 | in scope |
+
+Read the ordering. Small talk outscores a real question, and a service the practice does not offer
+outscores both. **No single threshold separates any of those pairs** — raise it and genuine
+questions go unanswered, lower it and the agent is handed an irrelevant page to answer "hello"
+from.
+
+So the threshold is not asked to do it alone:
+
+- **Small talk is filtered lexically**, before anything is embedded. It is trivially separable by
+  vocabulary and not at all by cosine, so the gate never has to judge intent — only passages.
+- **The gate stays at 0.54.** The in-scope and out-of-scope distributions overlap because of the
+  embedding model, not because of the number, and moving it trades one failure for another.
+- **Most of the leverage is in the documents.** Rewriting the location page in the words callers
+  actually use — "our address", "where we are", "how to get here" — moved those queries from 0.42
+  to 0.59 without touching a single threshold.
+
+And when it answers anyway, two things catch it: every number is checked against the passages it
+was given, and any reply containing a template placeholder is replaced before the caller hears it.
+That second one exists because an agent asked where it was once said *"Northgate Dental is located
+at [insert location]"* — a gap in the knowledge base, rendered as the shape of an answer.
+
+---
+
 ## Interruptions: the bug most phone agents have
 
 When a caller talks over the agent, you stop the audio. Simple. But there is a trap.
@@ -382,8 +417,27 @@ caller has no idea what it is talking about.
 
 ![The call monitor](docs/img/monitor.png)
 
-It also tells the difference between a real interruption and someone just saying **"mm-hmm"**.
-An agent that stops every time you say "uh huh" can never finish a sentence.
+This works on the live call in the browser, and getting it there was harder than the idea. There
+are two microphone streams on the page and only one can be trusted while the agent is talking:
+
+| | echo cancellation | usable during agent audio |
+|---|---|---|
+| our level meter (`getUserMedia`) | ✅ requested | ✅ yes |
+| Web Speech recogniser | ❌ opens its own stream | ❌ its transcript is partly the agent |
+
+So the DECISION to give way is made from loudness on the echo-cancelled stream, and the words are
+only believed once the agent stops. Reading the transcript to decide whether to stop talking
+would mean reading the agent's own sentence and treating it as an interruption — which is exactly
+how an earlier version ended up in conversation with itself.
+
+What the caller actually heard is read off the audio clock and **rounds down**: a half-heard word
+counts as unheard. That way the agent repeats something — mildly redundant. The other way it says
+"as I mentioned, Wednesday at noon" about a time that never left the speaker.
+
+One thing it deliberately gets wrong: "mm-hmm" is about as loud and as long as the start of a
+real interruption, and nothing in an energy signal separates them, so a backchannel will sometimes
+stop the audio. The recovery is that no turn is taken and the agent carries on. The other error
+has no recovery.
 
 ---
 
@@ -651,7 +705,7 @@ agents feel like a walkie-talkie.
 
 ## Tests
 
-249 in the gateway, 80 in the browser, plus two scripts that drive the whole thing for real.
+354 in the gateway, 96 in the browser, and four scripts that drive the whole thing for real.
 Each is named after the problem it prevents, not the function it calls:
 
 ```
@@ -665,11 +719,19 @@ test_a_time_that_does_not_exist_is_refused_even_on_a_free_day
 ```
 
 ```bash
-cd services/gateway && pytest          # 249
-cd apps/studio      && npm test        # 80
+cd services/gateway && pytest          # 354
+cd apps/studio      && npm test        # 96
 npm run smoke                          # every screen, in Chromium, with a fake microphone
+npm run scenarios                      # gateway down, socket dropped, 1024px, keyboard only
 python scripts/booking-e2e.py          # a real call, then a look in the database
+python scripts/interrupt-e2e.py        # talk over the agent, check what it thinks it said
+python scripts/long-call.py            # thirty turns, and print all of them
 ```
+
+`long-call.py` earns its place. Every structural check in it passed the first time — no crash, no
+empty reply, no repetition, 1.09× latency drift, and the caller's name survived thirty turns.
+Every bug it found was in the content, and only by reading the transcript. So it prints the whole
+conversation rather than a verdict.
 
 Some exist because the code was wrong first:
 
@@ -683,6 +745,10 @@ Some exist because the code was wrong first:
 | One spoken sentence became four replies | Two clocks disagreed and nothing tracked what had already been sent |
 | `sam@example.com` set the appointment reason to "check-up" | "example" contains "exam", and the match was on substrings |
 | The caller was told a free morning was full | The prompt said so whenever they had not yet named an hour — which is most of the time |
+| "One more thing" was parsed as one o'clock | It silently moved an appointment already agreed for nine thirty |
+| The agent read "[insert location]" out loud | Nothing in the knowledge base gave the practice an address, and a model fills in a form |
+| The streaming voice repeated the last few words | It tracked a position in the written reply and used it to slice the spoken one |
+| With the gateway down, the dashboard loaded forever | A loading state that never resolves is the least honest thing a UI can do |
 
 ---
 
