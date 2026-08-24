@@ -4,7 +4,7 @@ import { api, openCall, type Booked, type CallMemory, type Grounding, type Hit, 
 import { Icon } from '../components/Icon'
 import { AudioQueue, Listener, MicLevel, clearSpokenMemory, inEchoWindow, loadVoices, looksLikeEcho, rememberSpoken, resetEchoWindow, setAgentAudioProbe, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
 import { decideTurn } from '../turntaking'
-import { cleanTranscript, endsOnFiller } from '../transcript'
+import { endsOnFiller, polish } from '../transcript'
 
 /* Talking to the agent, by typing or by voice.
  *
@@ -266,10 +266,12 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   const startDictation = useCallback(async () => {
     if (listener.current) return
     listener.current = new Listener({
-      // Fillers stripped as they arrive. In a call they are load-bearing — "um" is what tells
-      // the endpointer somebody is mid-thought — but in a box being typed into they are just
-      // noise the caller has to delete.
-      onPartial: (text) => setDraft(cleanTranscript(text) || text),
+      // Fillers stripped as they arrive, and "comma" written as one. In a call they are
+      // load-bearing — "um" is what tells the endpointer somebody is mid-thought — but in a box
+      // being typed into they are just noise the caller has to delete. Spoken punctuation is a
+      // dictation feature and is enabled ONLY here: "period" said down a phone line is a length
+      // of time, and rewriting it would delete a word the caller meant.
+      onPartial: (text) => setDraft(polish(text, { spokenMarks: true }) || text),
     })
     listener.current.start()
     meter.current = new MicLevel()
@@ -494,9 +496,10 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
         }
         speechSeen.current = false
         sentSoFar.current = text
-        // Fillers and stutters go no further. The endpointer needed them; the agent does not,
-        // and a turn that was nothing but "um" is not a turn at all.
-        const clean = cleanTranscript(decision.text)
+        // Fillers and stutters go no further, and the sentence gets its capital and its
+        // question mark. The endpointer needed the raw text; the agent does not, and a turn
+        // that was nothing but "um" is not a turn at all.
+        const clean = polish(decision.text)
         if (clean) send(clean)
       }
     }, 60)
@@ -598,7 +601,9 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
                 <div className="av" data-who="caller">You</div>
                 <div>
                   <div className="msg" style={{ opacity: 0.6 }}>
-                    {cleanTranscript(partial) || partial}
+                    {/* Not punctuated yet: a full stop that appears and then jumps along as
+                        more words arrive is more distracting than none at all. */}
+                    {polish(partial, { punctuate: false }) || partial}
                     <i className="caret" />
                   </div>
                   {endpointMs !== null && (

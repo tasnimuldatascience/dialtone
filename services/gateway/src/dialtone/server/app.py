@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 import time
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime
@@ -455,7 +456,10 @@ async def call_socket(socket: WebSocket, call_id: str) -> None:
                 if event["type"] == "done":
                     p.store.add_turn(call_id, len(live.conversation.turns) - 1, event)
                     if speaker:
-                        await speaker.finish(str(event.get("spoken") or ""))
+                        # `agent`, not `spoken`. The tokens carried the written text and this
+                        # has to be the same string, or every offset after the first rewritten
+                        # number lands mid-word. See _ClauseSpeaker.
+                        await speaker.finish(str(event.get("agent") or ""))
 
             if live.conversation.ended:
                 await socket.send_json({"type": "ended", "reason": "the flow reached an end"})
@@ -489,23 +493,61 @@ class _ClauseSpeaker:
     A clause is only handed over once it is COMPLETE. Synthesising a half-written phrase produces
     the wrong intonation -- the model rises at the end of "A routine check-up costs forty" because
     it thinks that is the whole thought -- and the seam is audible when the rest arrives.
+
+    THREE RULES, EACH ONE A CALL THAT WENT WRONG.
+
+    EVERYTHING IS TRACKED IN THE MODEL'S OWN WORDS, never the speech-ready rewrite. There are two
+    versions of every reply -- "$45" as written, "forty five dollars" as spoken -- and they have
+    different lengths, so a position in one means nothing in the other. Keeping a position in the
+    written text and using it to slice the spoken text made a caller hear:
+
+        "A check-up is forty five dollars."
+        "y five dollars. Would you like to book one?"
+
+    The gap between the two strings was said twice. So this class keeps the text it has spoken
+    VERBATIM rather than an index into it, and `finish` refuses anything that is not a
+    continuation of what was already said.
+
+    A BOUNDARY MUST BE FOLLOWED BY A SPACE. Punctuation alone is not a clause ending: "8:30" and
+    "$1,200" both contain one, and cutting there produced "We open at eight" ... "thirty and
+    close at six" -- the agent reading a time as two separate numbers.
+
+    IT STOPS WHERE THE TRANSCRIPT STOPS. The reply is trimmed to one or two sentences AFTER
+    generation, so a speaker that keeps going says a third sentence the caller never sees.
     """
 
-    #: Punctuation the model emits that reliably ends a speakable unit.
-    _BOUNDARY = (",", ".", "!", "?", ";", ":")
+    #: Punctuation that ends a clause -- but only where a space or the end of the text follows.
+    _BOUNDARY = re.compile(r"[,.!?;:](?=\s|$)")
+    #: Sentence enders, same rule.
+    _SENTENCE = re.compile(r"[.!?](?=\s|$)")
+    #: The same limit `_one_or_two_sentences` applies to the transcript.
+    _MAX_SENTENCES = 2
 
     def __init__(self, socket: WebSocket, platform: Platform, live: Any) -> None:
         self.socket = socket
         self.platform = platform
         self.live = live
-        self.spoken_upto = 0
+        #: The reply as written, up to the last thing handed to synthesis. The text itself, not
+        #: a position in it -- see the class docstring for what a position cost.
+        self.said = ""
         self.index = 0
         self.started = time.perf_counter()
         self.first_sent = False
 
     async def feed(self, visible: str) -> None:
-        """Called on every token. Emits audio for any clause that has just completed."""
-        pending = visible[self.spoken_upto:]
+        """Called on every token. Emits audio for any clause that has just completed.
+
+        `visible` is the reply as the model has written it so far, marker-stripped -- the same
+        string that grows on screen.
+        """
+        if not visible.startswith(self.said):
+            # Not a continuation of what was spoken. Should not happen; saying more would
+            # repeat rather than continue, so say nothing.
+            return
+        if self._sentences_in(self.said) >= self._MAX_SENTENCES:
+            return
+
+        pending = visible[len(self.said):]
 
         # The opening is cut short deliberately -- it is the only part the caller waits on, and
         # it is short for TWO compounding reasons: less text to wait for the model to write, and
@@ -516,7 +558,7 @@ class _ClauseSpeaker:
         if len(pending) < target:
             return
 
-        cut = max(pending.rfind(mark) for mark in self._BOUNDARY)
+        cut = self._last_boundary(pending)
         if cut < 0:
             # No boundary yet. For the opening only, break on a word instead: waiting for the
             # model to reach a comma can cost more silence than the whole phrase is worth.
@@ -526,16 +568,43 @@ class _ClauseSpeaker:
             if cut < 0:
                 return
 
-        clause = pending[: cut + 1].strip()
-        if clause:
-            self.spoken_upto += cut + 1
-            await self._say(clause)
+        clause = pending[: cut + 1]
+        if clause.strip():
+            await self._advance(self.said + clause)
 
-    async def finish(self, final: str) -> None:
-        """Speak whatever is left once the model has stopped."""
-        remainder = final[self.spoken_upto:].strip()
-        if remainder:
-            await self._say(remainder)
+    async def finish(self, reply: str) -> None:
+        """Speak whatever is left once the model has stopped.
+
+        `reply` is the finished text AS WRITTEN -- the `agent` field, not `spoken`. Handing it
+        the speech-ready rewrite is the bug this class is built around, so a mismatch is treated
+        as "there is nothing safe to add" rather than sliced anyway.
+        """
+        if reply.startswith(self.said):
+            await self._advance(reply)
+
+    # -- internals ---------------------------------------------------------
+    async def _advance(self, upto: str) -> None:
+        """Speak the part of `upto` that has not been said, stopping at the sentence limit."""
+        capped = upto[: self._sentence_limit(upto)]
+        clause = capped[len(self.said):]
+        if not clause.strip():
+            return
+        self.said = capped
+        await self._say(clause.strip())
+
+    def _last_boundary(self, text: str) -> int:
+        matches = list(self._BOUNDARY.finditer(text))
+        return matches[-1].start() if matches else -1
+
+    def _sentences_in(self, text: str) -> int:
+        return len(self._SENTENCE.findall(text))
+
+    def _sentence_limit(self, text: str) -> int:
+        """Offset just past the last sentence the transcript will keep."""
+        for count, match in enumerate(self._SENTENCE.finditer(text), start=1):
+            if count >= self._MAX_SENTENCES:
+                return match.end()
+        return len(text)
 
     async def _say(self, clause: str) -> None:
         from ..brain.speakable import speakable
@@ -563,6 +632,7 @@ class _ClauseSpeaker:
         except Exception:  # noqa: BLE001 -- a voice failure must not end the call
             log.exception("synthesis failed on %s", self.live.call_id)
             await self.socket.send_json({"type": "audio_failed"})
+
 
 
 async def _stream_voice(socket: WebSocket, p: Platform, live: Any, text: str) -> None:
