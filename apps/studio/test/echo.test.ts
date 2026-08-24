@@ -17,7 +17,7 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest'
-import { clearSpokenMemory, looksLikeEcho, rememberSpoken } from '../src/voice'
+import { ECHO_GUARD_MS, clearSpokenMemory, inEchoWindow, looksLikeEcho, rememberSpoken, resetEchoWindow, setAgentAudioProbe } from '../src/voice'
 
 describe('echo rejection', () => {
   beforeEach(() => clearSpokenMemory())
@@ -111,5 +111,48 @@ describe('echo rejection', () => {
     expect(looksLikeEcho('northgate dental how can i help')).toBe(true)
     expect(looksLikeEcho('a routine check-up costs forty five pounds')).toBe(true)
     expect(looksLikeEcho('can I book an appointment for next week')).toBe(false)
+  })
+})
+
+describe('the echo window', () => {
+  beforeEach(() => {
+    clearSpokenMemory()
+    resetEchoWindow()
+  })
+
+  it('is shut while the agent is audible', () => {
+    setAgentAudioProbe(() => true)
+    expect(inEchoWindow()).toBe(true)
+    setAgentAudioProbe(null)
+  })
+
+  it('stays shut after the agent stops', () => {
+    // THE BUG THIS EXISTS FOR. Recognition reports what it heard several hundred milliseconds
+    // late, so asking "is the agent audible right now" asks about the wrong moment entirely --
+    // the sound was made while it still was. The window covers that delay.
+    let audible = true
+    setAgentAudioProbe(() => audible)
+    expect(inEchoWindow()).toBe(true)
+
+    audible = false
+    setAgentAudioProbe(() => audible)
+    // The agent has stopped, but a transcript arriving now describes sound made before it did.
+    expect(inEchoWindow()).toBe(true)
+    expect(ECHO_GUARD_MS).toBeGreaterThan(500)
+    setAgentAudioProbe(null)
+  })
+
+  it('opens again once the guard has elapsed', async () => {
+    setAgentAudioProbe(() => false)
+    resetEchoWindow()
+    expect(inEchoWindow()).toBe(false)
+  })
+
+  it('a new call is not muted by the previous one', () => {
+    setAgentAudioProbe(() => true)
+    expect(inEchoWindow()).toBe(true)
+    setAgentAudioProbe(null)
+    resetEchoWindow()
+    expect(inEchoWindow()).toBe(false)
   })
 })

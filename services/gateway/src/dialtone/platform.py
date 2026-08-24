@@ -197,57 +197,62 @@ class Platform:
         )
         for title, body in SEED_DOCUMENTS.items():
             self.store.add_document(agent["id"], title, body, source="seed")
-        self.store.add_number("+441134960001", label="Main line", agent_id=agent["id"])
-        self.store.add_number("+441134960002", label="Emergencies", agent_id=agent["id"])
+        self.store.add_number("+12125550142", label="Main line", agent_id=agent["id"])
+        self.store.add_number("+12125550188", label="Emergencies", agent_id=agent["id"])
         log.info("seeded starter agent %s", agent["id"])
 
 
 SEED_DOCUMENTS: dict[str, str] = {
     "Opening hours": """
-Northgate Dental is open Monday to Friday, eight thirty in the morning until six in the evening.
-We are closed at weekends and on all bank holidays.
+Northgate Dental is open Monday through Friday, eight thirty in the morning until six in the
+evening. We are closed on weekends and on federal holidays.
 
 Late appointments are available on Thursdays until eight in the evening. These are popular and we
 recommend booking at least two weeks ahead.
 
-The practice is closed for lunch between one and two o'clock every weekday.
+The office is closed for lunch between noon and one o'clock every weekday.
 """.strip(),
     "Prices": """
-A routine check-up costs forty five pounds. This includes a full examination, x-rays if needed,
-and a scale and polish.
+A routine check-up costs seventy five dollars. This includes a full exam, x-rays if needed, and a
+cleaning.
 
-A white filling costs between one hundred and twenty and one hundred and eighty pounds, depending
-on the size of the cavity.
+A white filling costs between one hundred eighty and three hundred forty dollars, depending on
+the size of the cavity.
 
-A hygienist appointment is sixty pounds for thirty minutes.
+A hygienist appointment is ninety five dollars for thirty minutes.
 
 There is no charge for a first consultation if you are joining the practice as a new patient.
-We accept most private dental plans and we are an NHS practice for children under eighteen.
+
+We accept most PPO insurance plans and we file the claim for you. We do not accept HMO plans. For
+patients without insurance we offer an in-house membership plan at twenty nine dollars a month,
+which covers two cleanings a year and twenty percent off other treatment.
 """.strip(),
     "Emergencies": """
 If you have severe toothache, a knocked-out tooth, or facial swelling, call us immediately and we
-will find you a same-day emergency appointment. We keep two emergency slots free every morning.
+will find you a same-day emergency appointment. We keep two emergency slots open every morning.
 
-Out of hours, call the NHS on one one one. If you have swelling that is affecting your breathing
-or swallowing, go to accident and emergency straight away.
+After hours, call the main number and the answering service will page the on-call dentist, who
+returns calls within thirty minutes. If you have swelling that is affecting your breathing or
+swallowing, go to the emergency room right away.
 
 For a knocked-out adult tooth, keep it in milk and come in within the hour if you possibly can.
 """.strip(),
     "Appointments and cancellations": """
 Please give us at least twenty four hours notice if you need to cancel. Appointments cancelled
-with less notice may be charged at half the appointment fee.
+with less notice may be charged a fifty dollar fee.
 
 We send a text reminder two days before every appointment. If you would like to change how we
-contact you, tell the receptionist and we will update your record.
+contact you, tell the front desk and we will update your record.
 
-New patients should arrive ten minutes early to complete a medical history form.
+New patients should arrive fifteen minutes early to complete a medical history form, or fill it
+out online beforehand.
 """.strip(),
     "Parking and access": """
-There is free parking for patients in the car park behind the practice, accessed from Northgate
-Lane. There are twelve spaces including two accessible bays.
+There is free parking for patients in the lot behind the building, accessed from Northgate Lane.
+There are twelve spaces including two accessible spots.
 
-The practice is fully accessible on the ground floor. There is a step-free entrance on the left
-hand side of the building and a lift to the first floor surgeries.
+The office is fully accessible on the first floor. There is a step-free entrance on the left hand
+side of the building and an elevator to the second floor operatories.
 
 The number forty two and number sixteen buses both stop directly outside.
 """.strip(),

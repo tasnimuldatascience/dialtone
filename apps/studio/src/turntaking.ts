@@ -53,6 +53,26 @@ export interface TurnInput {
   heardSpeech?: boolean
 }
 
+/**
+ * Reduce a transcript to what it MEANS, for comparison only.
+ *
+ * Speech recognition revises as it goes: an interim "hi how are you doing" is finalised as
+ * "Hi, how are you doing?" -- same words, different string. Comparing raw text therefore reads a
+ * revision as a brand new sentence, which is how one spoken greeting produced a fourth reply
+ * after the first three had already been sent.
+ */
+function key(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim()
+}
+
+/** How much of the new text is words already sent. 1 means it is purely a rewording. */
+function overlapWithSent(fresh: string, sent: string): number {
+  const freshWords = key(fresh).split(' ').filter(Boolean)
+  if (!freshWords.length) return 1
+  const sentWords = new Set(key(sent).split(' ').filter(Boolean))
+  return freshWords.filter((w) => sentWords.has(w)).length / freshWords.length
+}
+
 export interface TurnDecision {
   send: boolean
   /** The part of the transcript that has not been sent yet. */
@@ -82,10 +102,33 @@ export function decideTurn(input: TurnInput): TurnDecision {
 
   // Only ever send what is new. The interim result repeats everything since the last final
   // result, so without this one spoken sentence becomes a turn per word.
+  //
+  // Compared on the NORMALISED form. Recognition finalises "hi how are you doing" as "Hi, how
+  // are you doing?" -- the same sentence with capitals and a question mark -- and a raw string
+  // comparison reads that as new text and sends the whole thing a second time.
   const sent = input.alreadySent.trim()
-  const fresh = transcript.startsWith(sent) ? transcript.slice(sent.length).trim() : transcript
+  const sentKey = key(sent)
+  const fullKey = key(transcript)
+
+  let fresh: string
+  if (sentKey && fullKey.startsWith(sentKey)) {
+    // Take the tail in normalised space, then map back to the words of the original so the
+    // agent still receives the caller's own wording rather than a stripped version.
+    const spokenWords = transcript.split(/\s+/).filter(Boolean)
+    const alreadyCount = sentKey.split(' ').filter(Boolean).length
+    fresh = spokenWords.slice(alreadyCount).join(' ').trim()
+  } else {
+    fresh = transcript
+  }
+
   if (!fresh) {
     return { send: false, text: '', reason: 'nothing new since the last turn' }
+  }
+
+  // A revision rather than a continuation: the recogniser rewrote what it already gave us. Its
+  // words are all words we have sent, so there is nothing here the agent has not heard.
+  if (sentKey && overlapWithSent(fresh, sent) >= 0.85) {
+    return { send: false, text: '', reason: 'the recogniser reworded what was already sent' }
   }
 
   const threshold = Math.max(input.thresholdMs, MIN_SILENCE_MS)

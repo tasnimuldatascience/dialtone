@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import re
 import threading
 import time
@@ -182,10 +183,27 @@ class Synthesizer:
         with self._lock:
             if self._kokoro is not None:
                 return
+            import onnxruntime as ort
             from kokoro_onnx import Kokoro
 
             started = time.perf_counter()
-            self._kokoro = Kokoro(str(self.model_path), str(self.voices_path))
+
+            # DO NOT LET SYNTHESIS TAKE THE WHOLE MACHINE. By default onnxruntime spawns a
+            # worker per core and saturates them, and it shares this box with a language model
+            # that needs CPU-side work of its own to pump tokens. Measured: the first reply of a
+            # session took 1236ms to its first token against ~110ms for every reply after, and
+            # the model was demonstrably warm -- the same generation ran in 130ms with nothing
+            # else on the machine.
+            #
+            # Half the cores is enough to stay ahead of playback (synthesis runs at ~2x real
+            # time) and leaves the model room to think.
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = max(2, (os.cpu_count() or 8) // 2)
+            options.inter_op_num_threads = 1
+            session = ort.InferenceSession(
+                str(self.model_path), options, providers=["CPUExecutionProvider"]
+            )
+            self._kokoro = Kokoro.from_session(session, str(self.voices_path))
 
             # One throwaway synthesis. A cold ONNX session pays graph optimisation and arena
             # setup on its first call, and paying that on a live caller's opening sentence is

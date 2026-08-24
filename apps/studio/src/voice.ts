@@ -102,9 +102,50 @@ export function setAgentAudioProbe(probe: (() => boolean) | null): void {
   agentAudioProbe = probe
 }
 
+/**
+ * The last moment the agent was making any sound at all.
+ *
+ * Updated by `agentAudible()` itself, which the live loop polls continuously. Keeping the
+ * timestamp rather than only the instantaneous answer is what closes the gap that kept letting
+ * echo through: recognition reports what it heard several hundred milliseconds late, so a check
+ * of "is the agent audible RIGHT NOW" is asking about the wrong moment. What matters is whether
+ * the agent was audible when the sound was actually made.
+ */
+let lastAudibleAt = 0
+
+/**
+ * How long after the agent stops before the microphone is believed again.
+ *
+ * Covers the recogniser's own reporting delay plus the speakers settling. Generous on purpose:
+ * the cost of being too slow here is that a caller who interrupts the instant the agent stops
+ * has to repeat a word. The cost of being too fast is the agent transcribing itself, answering
+ * its own sentence, and the call spiralling -- which is what kept happening.
+ */
+export const ECHO_GUARD_MS = 900
+
 /** True if the agent is producing sound by any route: browser speech or streamed audio. */
 export function agentAudible(): boolean {
-  return agentSpeaking || (agentAudioProbe?.() ?? false)
+  const audible = agentSpeaking || (agentAudioProbe?.() ?? false)
+  if (audible) lastAudibleAt = Date.now()
+  return audible
+}
+
+/**
+ * True if the agent is speaking, or stopped so recently that anything the recogniser reports now
+ * was captured while it still was.
+ *
+ * This is the check that matters, and it is the one every guard should use. `agentAudible` alone
+ * answers a question about the present about a transcript that describes the past.
+ */
+export function inEchoWindow(): boolean {
+  if (agentAudible()) return true
+  return Date.now() - lastAudibleAt < ECHO_GUARD_MS
+}
+
+/** Reset between calls, so a new call is not muted by the previous one. */
+export function resetEchoWindow(): void {
+  lastAudibleAt = 0
+  agentSpeaking = false
 }
 
 /**
@@ -201,7 +242,7 @@ export class Listener {
       // ran stays in the buffer and is prepended to whatever the caller says next -- so the
       // transcript never stops changing, the turn never ends, and the agent appears not to know
       // when the caller has finished.
-      if (agentAudible()) {
+      if (inEchoWindow()) {
         this.settled = ''
         return
       }

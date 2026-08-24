@@ -105,10 +105,43 @@ class LocalBrain:
             self._warm()
 
     def _warm(self) -> None:
+        """Generate a realistic reply once, before any caller exists.
+
+        A single-token warm-up is not enough, and measurement is what showed it: the first real
+        reply of a session took 2215ms to first audio while every reply after it took ~700ms.
+        One token exercises the prefill path and leaves the decode loop, the sampler and the
+        attention kernels for the caller to pay for.
+
+        So this warms with a system prompt and a question of roughly the shape a real turn has,
+        and generates enough tokens to reach a steady state. It costs about a second of startup
+        and removes three times that from the first person who rings.
+        """
         try:
-            enc = self._encode([Turn("user", "hi")])
-            self._model.generate(**enc, max_new_tokens=1, do_sample=False,
+            # THE PROMPT LENGTH MATTERS AS MUCH AS THE TOKEN COUNT. A real turn carries the phone
+            # rules, the agent's persona, several retrieved passages and the conversation so far
+            # -- close to a thousand tokens. Warming on a short prompt leaves the kernels for
+            # that shape uncompiled, and the measurement showed it precisely: first token took
+            # 1226ms on the first real turn and ~110ms on every turn after it.
+            filler = (
+                "Opening hours: Monday to Friday, eight thirty until six. Closed at weekends.\n"
+                "Prices: a routine check-up is forty five pounds, including examination and "
+                "polish. A white filling is one hundred and twenty to one hundred and eighty "
+                "pounds. A hygienist appointment is sixty pounds.\n"
+                "Emergencies: call immediately for a same-day slot. Out of hours, call one one "
+                "one.\n"
+            ) * 3
+            enc = self._encode([
+                Turn("system", build_system_prompt(
+                    persona="a warm, efficient receptionist",
+                    business="Northgate Dental",
+                    objective="Answer the caller's question.",
+                    knowledge=filler,
+                )),
+                Turn("user", "how much is a routine appointment and when are you open?"),
+            ])
+            self._model.generate(**enc, max_new_tokens=24, do_sample=False,
                                  pad_token_id=self._tokenizer.eos_token_id)
+            log.info("warmed on a %d-token prompt", enc["input_ids"].shape[-1])
         except Exception:  # noqa: BLE001 — warming is best-effort
             log.debug("warm-up generation failed; first call will be slower", exc_info=True)
 

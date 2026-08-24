@@ -1,12 +1,13 @@
 """Turning written text into something a voice engine reads correctly.
 
-WHY THIS IS NEEDED EVEN WITH A GOOD MODEL. The system prompt asks for spoken forms — "forty five
-pounds", not "£45" — and a small model complies most of the time. Most of the time is not good
-enough here, because the failure is silent: nothing errors, the transcript looks perfect, and the
-caller hears "pound forty five" or "eight P M" or, on some engines, the digits read individually.
+WHY THIS IS NEEDED EVEN WITH A GOOD MODEL. The system prompt asks for spoken forms — "seventy
+five dollars", not "$75" — and a small model complies most of the time. Most of the time is not
+good enough here, because the failure is silent: nothing errors, the transcript looks perfect,
+and the caller hears "dollar seventy five" or "eight P M" or, on some engines, the digits read
+one at a time.
 
 The knowledge base makes this worse rather than better. An operator writes their price list as
-"forty five pounds", the model reads it, and helpfully converts it to "£45" on the way out.
+"seventy five dollars", the model reads it, and helpfully converts it to "$75" on the way out.
 
 So this is a last pass over the reply, after the model and before the synthesiser. It is small,
 boring, and it is the difference between an agent that sounds like a person and one that sounds
@@ -28,15 +29,28 @@ _UNITS = (
 _TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
 
 _CURRENCY = {"£": ("pound", "pounds"), "$": ("dollar", "dollars"), "€": ("euro", "euros")}
+
+#: Words that can follow an amount without being modified by it. Everything else that directly
+#: follows a price is treated as a noun the price is describing, which takes the singular unit.
+_NOT_A_NOUN = frozenset("""
+in on at for to from by with and or but so if per a an the is are was were will would each
+including includes plus minus over under about around only just total altogether
+""".split())
 _SUBUNIT = {"£": ("penny", "pence"), "$": ("cent", "cents"), "€": ("cent", "cents")}
+
+
+#: Whether hundreds take an "and": "one hundred and twenty" (British) or "one hundred twenty"
+#: (American). One flag rather than a per-call argument, because a business speaks one dialect
+#: and mixing them inside a single call is more jarring than either choice on its own.
+SAY_AND_IN_HUNDREDS = False
 
 
 def number_to_words(n: int) -> str:
     """Cardinal numbers up to the millions, the way they are said aloud.
 
-    Includes the "and" that British English uses and American English drops: "one hundred and
-    twenty" rather than "one hundred twenty". A dental practice in Leeds quoting prices is the
-    use case, and the American form reads as a typo when spoken here.
+    American convention by default: "one hundred twenty", not "one hundred and twenty". The
+    British form is one flag away and reads as a typo to the other audience, which is why the
+    choice is explicit rather than whichever the author happened to write first.
     """
     if n < 0:
         return "minus " + number_to_words(-n)
@@ -48,14 +62,17 @@ def number_to_words(n: int) -> str:
     if n < 1_000:
         hundreds, rest = divmod(n, 100)
         out = f"{_UNITS[hundreds]} hundred"
-        return f"{out} and {number_to_words(rest)}" if rest else out
+        if not rest:
+            return out
+        joiner = " and " if SAY_AND_IN_HUNDREDS else " "
+        return out + joiner + number_to_words(rest)
     if n < 1_000_000:
         thousands, rest = divmod(n, 1_000)
         out = f"{number_to_words(thousands)} thousand"
         if not rest:
             return out
-        # "two thousand and fifty", but "two thousand one hundred and fifty".
-        joiner = " and " if rest < 100 else " "
+        # "two thousand and fifty", but "two thousand one hundred fifty".
+        joiner = " and " if (rest < 100 and SAY_AND_IN_HUNDREDS) else " "
         return out + joiner + number_to_words(rest)
     millions, rest = divmod(n, 1_000_000)
     out = f"{number_to_words(millions)} million"
@@ -134,21 +151,31 @@ def speakable(text: str) -> str:
     # ── currency ──────────────────────────────────────────────────────────
     def money(match: re.Match[str]) -> str:
         symbol, whole, fraction = match.group(1), match.group(2), match.group(3)
+        trailing = match.group(4) or ""
         amount = int(whole.replace(",", ""))
         singular, plural = _CURRENCY[symbol]
-        unit = singular if amount == 1 else plural
+
+        # "$50 cancellation fee" is a compound adjective and takes the singular -- "a fifty
+        # dollar fee", never "a fifty dollars fee". What follows is the only thing that tells
+        # it apart from "$50 in total", where the plural is correct: an amount followed directly
+        # by a noun is modifying that noun.
+        modifying = bool(trailing) and trailing.strip() not in _NOT_A_NOUN
+        unit = singular if amount == 1 or (modifying and not fraction) else plural
+
         said = f"{number_to_words(amount)} {unit}"
         if fraction and int(fraction):
             sub_single, sub_plural = _SUBUNIT[symbol]
             pennies = int(fraction.ljust(2, "0")[:2])
             said += f" {number_to_words(pennies)} {sub_single if pennies == 1 else sub_plural}"
-        return said
+        return said + trailing
 
     # The digit group must not be able to end on a comma. `[\d,]+` matched "45," in "£45, which
     # includes...", swallowing the comma along with the amount -- which removed a clause boundary
     # the synthesiser splits on and flattened the intonation. Thousands separators still work:
     # a comma only counts when three digits follow it.
-    out = re.sub(r"([£$€])\s?(\d{1,3}(?:,\d{3})*|\d+)(?:\.(\d{1,2}))?", money, out)
+    out = re.sub(
+        r"([£$€])\s?(\d{1,3}(?:,\d{3})*|\d+)(?:\.(\d{1,2}))?(\s+[a-z]+)?", money, out
+    )
 
     # ── times ─────────────────────────────────────────────────────────────
     out = re.sub(

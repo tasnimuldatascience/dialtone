@@ -1,9 +1,9 @@
 """Checking the agent's numbers against the documents it was given.
 
 THE FAILURE THIS CATCHES. A small model asked "how much for a check-up and a hygienist?" reads
-"forty five pounds" and "sixty pounds" in the retrieved passages and answers "around fifty five
-pounds". It has not misread anything — it has helpfully synthesised, which is what these models
-are for and exactly what a price must never be subjected to.
+"seventy five dollars" and "ninety five dollars" in the retrieved passages and answers "around a
+hundred and seventy". It has not misread anything — it has helpfully synthesised, which is what
+these models are for and exactly what a price must never be subjected to.
 
 Prompting reduces it and does not remove it. So the numbers are checked afterwards, against the
 passages the agent was actually given, and anything that was not in them is flagged.
@@ -26,8 +26,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .speakable import number_to_words
-
 
 def _key(text: str) -> str:
     """Reduce a spelled-out number to a lookup key: no spaces, hyphens, or joining "and"."""
@@ -38,18 +36,39 @@ def _key(text: str) -> str:
 #: written "45" compare equal. Built from the same table the speech normaliser uses, so the two
 #: can never disagree about what a number is called.
 #:
-#: EVERY value up to 999, not a hand-picked list. An earlier version listed the round hundreds it
-#: expected to see, and "two hundred and thirty pounds" -- an entirely invented total -- was
-#: reported as clean because the checker could not read the number it was meant to be checking.
+#: EVERY value up to 1000, in BOTH dialects, not a hand-picked list. Two versions of this have
+#: been wrong in the same way:
+#:
+#:   listing only the round hundreds it expected meant "two hundred thirty dollars" -- an
+#:   entirely invented total -- was reported as clean, because the checker could not read the
+#:   number it was meant to be checking
+#:   building the table in one dialect meant every price written the other way became unreadable
+#:
 #: A gap in a safety check is worse than no safety check, because the clean report is believed.
-_WORD_TO_DIGIT: dict[str, int] = {_key(number_to_words(_n)): _n for _n in range(1000)}
-_WORD_TO_DIGIT[_key(number_to_words(1000))] = 1000
+def _both_dialects(n: int) -> list[str]:
+    from . import speakable as _sp
+
+    was = _sp.SAY_AND_IN_HUNDREDS
+    try:
+        _sp.SAY_AND_IN_HUNDREDS = False
+        american = _key(_sp.number_to_words(n))
+        _sp.SAY_AND_IN_HUNDREDS = True
+        british = _key(_sp.number_to_words(n))
+    finally:
+        _sp.SAY_AND_IN_HUNDREDS = was
+    return [american, british]
+
+
+_WORD_TO_DIGIT: dict[str, int] = {}
+for _n in range(1001):
+    for _spelling in _both_dialects(_n):
+        _WORD_TO_DIGIT[_spelling] = _n
 
 _DIGITS = re.compile(r"\b\d[\d,]*(?:\.\d+)?\b")
 
 # Spelled-out numbers. The words allowed after "hundred and" are restricted to actual number
 # words rather than any word: an earlier version used `[a-z-]+` there, which greedily swallowed
-# the unit, so "one hundred and fifty pounds" produced the lookup key "onehundredfiftypounds",
+# the unit, so "one hundred fifty dollars" produced the lookup key "onehundredfiftydollars",
 # matched nothing, and an invented price sailed through unflagged.
 #
 # Alternation order matters throughout — the longest form has to come first, or "twenty five"
@@ -61,8 +80,12 @@ _UNITS_RE = (
 _TENS_RE = "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
 _TENS_OR_UNIT = rf"(?:(?:{_TENS_RE})(?:[\s\-](?:{_UNITS_RE}))?|(?:{_UNITS_RE}))"
 
+# The "and" is OPTIONAL, because the two dialects disagree about it: British English says "one
+# hundred and eighty", American English says "one hundred eighty". Requiring it split every
+# American amount into two numbers -- "nine hundred ninety dollars" read as 900 and 90 -- so a
+# price quoted straight out of the documents came back as two figures with no source.
 _NUMBER_PHRASE = re.compile(
-    rf"\b(?:(?:{_UNITS_RE})\s+hundred(?:\s+and\s+{_TENS_OR_UNIT})?|{_TENS_OR_UNIT}|zero)\b",
+    rf"\b(?:(?:{_UNITS_RE})\s+hundred(?:\s+(?:and\s+)?{_TENS_OR_UNIT})?|{_TENS_OR_UNIT}|zero)\b",
     re.IGNORECASE,
 )
 
@@ -137,8 +160,8 @@ def _around(text: str, start: int, end: int, width: int = 28) -> str:
 def check(reply: str, sources: str) -> Grounding:
     """Which numbers in `reply` appear in `sources`.
 
-    Comparison is on VALUE, not on spelling: the documents say "forty five pounds", the model may
-    write "£45", and those are the same claim. Both sides are reduced to numbers first.
+    Comparison is on VALUE, not on spelling: the documents say "seventy five dollars", the model
+    may write "$75", and those are the same claim. Both sides are reduced to numbers first.
     """
     result = Grounding()
     if not reply.strip():
@@ -147,7 +170,7 @@ def check(reply: str, sources: str) -> Grounding:
     source_values = {value for value, _ in extract_numbers(sources)}
 
     if _HEDGES.search(reply) and source_values:
-        # "Around forty five pounds" when the document says exactly forty five. The figure checks
+        # "Around seventy five dollars" when the document says exactly that. The figure checks
         # out and the sentence is still wrong, because it turns a fixed price into an estimate.
         result.hedged = True
 

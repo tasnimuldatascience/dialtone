@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ViewProps } from '../App'
 import { api, openCall, type Grounding, type Hit, type Timing } from '../api'
 import { Icon } from '../components/Icon'
-import { AudioQueue, Listener, MicLevel, agentAudible, clearSpokenMemory, loadVoices, rememberSpoken, setAgentAudioProbe, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
+import { AudioQueue, Listener, MicLevel, clearSpokenMemory, inEchoWindow, loadVoices, looksLikeEcho, rememberSpoken, resetEchoWindow, setAgentAudioProbe, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
 import { decideTurn } from '../turntaking'
 import { cleanTranscript, endsOnFiller } from '../transcript'
 
@@ -194,7 +194,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
         // these, but the check is repeated here because this callback is also what advances the
         // turn state -- and a single leaked frame resets the settle timer, which is enough to
         // stop a turn ever ending.
-        if (agentAudible()) return
+        if (inEchoWindow()) return
 
         // New words are proof of speech, independent of the level meter. Microphone gain varies
         // enormously between machines, and a level threshold tuned on one laptop is wrong on the
@@ -220,7 +220,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
       // Ignored entirely while the agent is audible: on open speakers the microphone hears the
       // agent loudly, and counting that as caller speech kept resetting the silence timer, so
       // the turn could not end while the agent was talking OR for a while afterwards.
-      if (value > 0.08 && !agentAudible()) {
+      if (value > 0.08 && !inEchoWindow()) {
         lastVoiceAt.current = performance.now()
         speechSeen.current = true
       }
@@ -239,6 +239,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     setLines([])
     setSummary(null)
     clearSpokenMemory()
+    resetEchoWindow()
     sentSoFar.current = ''
     try {
       const { call_id, greeting } = await api.startCall(agentId, voiceOn ? 'voice' : 'text')
@@ -361,6 +362,12 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   useEffect(() => {
     if (!micOn || phase !== 'live') return
     const timer = window.setInterval(() => {
+      // Polled every 60ms, which is also what keeps the echo window's clock current.
+      if (inEchoWindow()) {
+        setTurnReason('agent speaking — not listening')
+        return
+      }
+
       const text = lastPartial.current.trim()
       if (!text) return
 
@@ -389,6 +396,13 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
       setTurnReason(decision.reason)
 
       if (decision.send) {
+        // Last line of defence, at the only point where being wrong actually costs something.
+        // Everything above tries to stop echo entering the transcript; this stops it leaving.
+        if (looksLikeEcho(decision.text)) {
+          sentSoFar.current = text
+          setTurnReason('discarded — that was the agent, not the caller')
+          return
+        }
         speechSeen.current = false
         sentSoFar.current = text
         // Fillers and stutters go no further. The endpointer needed them; the agent does not,

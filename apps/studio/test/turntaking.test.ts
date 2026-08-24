@@ -244,3 +244,47 @@ describe('the decision itself', () => {
     expect(RECOGNITION_LAG_MS).toBeGreaterThan(0)
   })
 })
+
+describe('recognition revising what it already gave us', () => {
+  it('does not send a sentence again when it is finalised with punctuation', () => {
+    // The fourth reply in the original bug report. Web Speech delivers "hi how are you doing" as
+    // an interim, then finalises it as "Hi, how are you doing?" -- same sentence, different
+    // string. Compared raw, that reads as a brand new turn.
+    const d = decideTurn({
+      transcript: 'Hi, how are you doing?',
+      alreadySent: 'hi how are you doing',
+      quietForMs: 2000,
+      settledForMs: 2000,
+      thresholdMs: 250,
+      heardSpeech: true,
+    })
+    expect(d.send).toBe(false)
+  })
+
+  it('still sends genuinely new words after a revision', () => {
+    const d = decideTurn({
+      transcript: 'Hi, how are you doing? I need an appointment.',
+      alreadySent: 'hi how are you doing',
+      quietForMs: 2000,
+      settledForMs: 2000,
+      thresholdMs: 250,
+      heardSpeech: true,
+    })
+    expect(d.send).toBe(true)
+    expect(d.text.toLowerCase()).toContain('appointment')
+    expect(d.text.toLowerCase()).not.toContain('how are you')
+  })
+
+  it('sends a genuinely different sentence even if it shares a word or two', () => {
+    const d = decideTurn({
+      transcript: 'can I book a hygienist appointment',
+      alreadySent: 'how much is a check-up',
+      quietForMs: 2000,
+      settledForMs: 2000,
+      thresholdMs: 250,
+      heardSpeech: true,
+    })
+    expect(d.send).toBe(true)
+    expect(d.text).toBe('can I book a hygienist appointment')
+  })
+})

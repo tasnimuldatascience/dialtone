@@ -358,12 +358,24 @@ async def call_socket(socket: WebSocket, call_id: str) -> None:
                 continue
 
             await socket.send_json({"type": "caller", "text": text})
+
+            voicing = live.channel == "voice" and p.voice.ready
+            speaker = _ClauseSpeaker(socket, p, live) if voicing else None
+
             async for event in live.conversation.respond(text):
                 await socket.send_json(event)
+
+                # SYNTHESISE WHILE THE MODEL IS STILL WRITING. Waiting for the finished reply
+                # meant the caller heard nothing until generation AND synthesis had both
+                # completed -- around two and a half seconds of silence, and the exact mistake
+                # `pipeline/orchestrator.py` spends four hundred words warning against.
+                if speaker and event["type"] == "token":
+                    await speaker.feed(str(event.get("spoken") or ""))
+
                 if event["type"] == "done":
                     p.store.add_turn(call_id, len(live.conversation.turns) - 1, event)
-                    if live.channel == "voice" and p.voice.ready:
-                        await _stream_voice(socket, p, live, str(event.get("spoken") or ""))
+                    if speaker:
+                        await speaker.finish(str(event.get("spoken") or ""))
 
             if live.conversation.ended:
                 await socket.send_json({"type": "ended", "reason": "the flow reached an end"})
@@ -384,6 +396,93 @@ async def call_socket(socket: WebSocket, call_id: str) -> None:
             log.debug("could not deliver the summary for %s; caller already gone", call_id)
         with suppress(Exception):
             await socket.close()
+
+
+class _ClauseSpeaker:
+    """Speaks a reply as the model writes it, one clause at a time.
+
+    THE WHOLE POINT OF STREAMING, applied to the last stage. The model emits tokens over a couple
+    of seconds; synthesis of the opening phrase takes about half a second. Done in sequence that
+    is a caller listening to silence for the sum of both. Overlapped, the caller hears the first
+    words while the model is still deciding the last ones.
+
+    A clause is only handed over once it is COMPLETE. Synthesising a half-written phrase produces
+    the wrong intonation -- the model rises at the end of "A routine check-up costs forty" because
+    it thinks that is the whole thought -- and the seam is audible when the rest arrives.
+    """
+
+    #: Punctuation the model emits that reliably ends a speakable unit.
+    _BOUNDARY = (",", ".", "!", "?", ";", ":")
+
+    def __init__(self, socket: WebSocket, platform: Platform, live: Any) -> None:
+        self.socket = socket
+        self.platform = platform
+        self.live = live
+        self.spoken_upto = 0
+        self.index = 0
+        self.started = time.perf_counter()
+        self.first_sent = False
+
+    async def feed(self, visible: str) -> None:
+        """Called on every token. Emits audio for any clause that has just completed."""
+        pending = visible[self.spoken_upto:]
+
+        # The opening is cut short deliberately -- it is the only part the caller waits on, and
+        # it is short for TWO compounding reasons: less text to wait for the model to write, and
+        # less text to synthesise. Measured, both matter: a 21-character opening cost 587ms to
+        # generate plus ~500ms waiting for the model to produce it, where a 3-character one cost
+        # 302ms in total. Later clauses can be whole, since they are made while this one plays.
+        target = 10 if not self.first_sent else 48
+        if len(pending) < target:
+            return
+
+        cut = max(pending.rfind(mark) for mark in self._BOUNDARY)
+        if cut < 0:
+            # No boundary yet. For the opening only, break on a word instead: waiting for the
+            # model to reach a comma can cost more silence than the whole phrase is worth.
+            if self.first_sent or len(pending) < 18:
+                return
+            cut = pending.rfind(" ", 0, 18)
+            if cut < 0:
+                return
+
+        clause = pending[: cut + 1].strip()
+        if clause:
+            self.spoken_upto += cut + 1
+            await self._say(clause)
+
+    async def finish(self, final: str) -> None:
+        """Speak whatever is left once the model has stopped."""
+        remainder = final[self.spoken_upto:].strip()
+        if remainder:
+            await self._say(remainder)
+
+    async def _say(self, clause: str) -> None:
+        from ..brain.speakable import speakable
+
+        try:
+            async for clip in self.platform.voice.speak(
+                speakable(clause), voice=self.live.conversation.config.voice
+            ):
+                await self.socket.send_json({
+                    "type": "audio",
+                    "index": self.index,
+                    "text": clip.text,
+                    "wav": base64.b64encode(clip.wav).decode("ascii"),
+                    "duration_ms": round(clip.duration_ms, 1),
+                    "generate_ms": round(clip.generate_ms, 1),
+                    # Measured from the moment the caller stopped speaking, not from the moment
+                    # synthesis began -- the caller is waiting through the model's thinking too.
+                    "first_audio_ms": round((time.perf_counter() - self.started) * 1000, 1)
+                    if not self.first_sent else None,
+                })
+                self.index += 1
+                self.first_sent = True
+        except WebSocketDisconnect:
+            raise
+        except Exception:  # noqa: BLE001 -- a voice failure must not end the call
+            log.exception("synthesis failed on %s", self.live.call_id)
+            await self.socket.send_json({"type": "audio_failed"})
 
 
 async def _stream_voice(socket: WebSocket, p: Platform, live: Any, text: str) -> None:
