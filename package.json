@@ -1,0 +1,14 @@
+{
+  "name": "dialtone",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Repo-level tooling. The app itself lives in apps/studio.",
+  "scripts": {
+    "smoke": "node scripts/smoke.mjs",
+    "screenshots": "node scripts/screenshots.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}

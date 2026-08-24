@@ -4,7 +4,7 @@
 
 **An AI phone agent that knows when you have finished talking.**
 
-[![tests](https://img.shields.io/badge/tests-127%20passing-4ade80?style=flat-square)](#run-it)
+[![tests](https://img.shields.io/badge/tests-255%20passing-4ade80?style=flat-square)](#run-it)
 [![python](https://img.shields.io/badge/python-3.12%2B-35e0d0?style=flat-square)](#run-it)
 [![typescript](https://img.shields.io/badge/typescript-5.6-35e0d0?style=flat-square)](#run-it)
 [![license](https://img.shields.io/badge/license-MIT-8ea0b5?style=flat-square)](LICENSE)
@@ -17,11 +17,16 @@
 
 Software for building AI agents that answer phone calls — like Retell.ai or Vapi.
 
+You can talk to it. It answers, in a real voice, and it **books an appointment** into a database
+you can go and look at afterwards.
+
 The hard part of a phone agent is not the AI. It is knowing **when the caller has stopped
 speaking** so the agent can reply. Reply too slowly and the call feels broken. Reply too quickly
 and you cut the caller off mid-sentence.
 
 dialtone measures both, and publishes the trade-off.
+
+Everything runs on your own machine. No API keys, no GPU, nothing paid.
 
 ---
 
@@ -69,6 +74,75 @@ often. Getting both at once is the point of this project.
 
 ---
 
+## It actually books the appointment
+
+An agent that has a nice conversation and leaves nothing behind is a demo. This one writes a row.
+
+```
+agent   Northgate Dental, how can I help?
+caller  hi, I need an appointment, my tooth is hurting
+agent   I'm sorry to hear that. What day and time would you prefer?
+caller  can I come tomorrow?
+agent   Certainly! Tomorrow at eight thirty in the morning would be ideal.
+caller  how about eight thirty in the morning
+agent   Tomorrow at eight thirty in the morning works perfectly.
+[form]  name, phone and email typed on screen
+caller  yes, that works
+        → NG5EA086 booked
+
+sqlite> select reference, starts_at, patient_name, phone from appointments;
+NG5EA086 | 2026-08-24T08:30 | Tasnimul Hasan | (212) 555-0142
+```
+
+That transcript is the output of `scripts/booking-e2e.py`, which drives the real API against
+the real model and then goes and looks in the database.
+
+Three decisions make it work, and each one came from a call that went wrong.
+
+**The available times are put in the prompt, not behind a tool call.** A 1.5B model asked to emit
+a structured tool call gets it right often enough to demo and not often enough to ship. A missed
+call produces this, which a real transcript captured:
+
+> *"I'm sorry, but I don't have access to real-time scheduling information."*
+
+Open slots are cheap to compute and short to write down, so the model is simply told them. It
+cannot fail to look them up.
+
+**The booking is decided by code, not by the model.** Confirming an appointment is the one
+irreversible act on the call. The model proposes a time in its own words; the calendar decides
+whether that time is real, free, and unambiguous. A model that hallucinates eight o'clock at a
+practice that opens at half past cannot bring an eight o'clock into existence — and that is not
+hypothetical, it happened, and the booking was correctly refused.
+
+**Names, phone numbers and email addresses are typed, never spoken.** Speech recognition is good
+at sentences and bad at strings. The same call produced *"tasty mulasson"* for a surname and
+*"abc iphone com"* for an email address — both plausible English, both wrong, and neither
+detectable from the transcript. So the agent is told never to ask for them, the caller types them
+on screen, and a typed value permanently outranks anything the agent thinks it heard.
+
+`starts_at` carries a `UNIQUE` constraint. Two callers can both be shown the same free slot; only
+one `INSERT` can win, and the loser is told rather than silently double-booked.
+
+---
+
+## Two ways to talk to it
+
+They are not a preference toggle over one behaviour. They are two different products, and the
+microphone means something different in each.
+
+| | **Call** | **Chat** |
+|---|---|---|
+| The agent | speaks, in a neural voice | stays silent |
+| The microphone | open the whole time | fills the box, and stops |
+| Who decides you finished | the endpointer | you, by pressing send |
+| A misheard sentence costs | a wasted turn | a backspace |
+
+Everything difficult in this repository lives in the Call column. Chat exists because dictating
+into a box is a genuinely better way to enter a sentence you want to check before sending — and
+conflating the two is what made the microphone feel unpredictable.
+
+---
+
 ## Run it
 
 You need Python 3.12+ and Node 20+. No API keys. No GPU. Nothing paid.
@@ -78,7 +152,7 @@ You need Python 3.12+ and Node 20+. No API keys. No GPU. Nothing paid.
 cd services/gateway
 pip install -e ".[serve,dev]"
 
-pytest                    # 127 tests
+pytest                    # 204 tests
 dialtone bench ablate     # see the results table
 dialtone serve            # starts on http://127.0.0.1:8071
 
@@ -86,6 +160,15 @@ dialtone serve            # starts on http://127.0.0.1:8071
 cd apps/studio
 npm install
 npm run dev               # open http://localhost:5173
+```
+
+Then press **Start call** and talk to it. Ask for an appointment, agree a time, type your details
+into the panel on the right, and say yes. Open the **Appointments** screen and it is there.
+
+To watch the whole thing happen without a browser:
+
+```bash
+python scripts/booking-e2e.py    # a real call, end to end, then checks the database
 ```
 
 ### Try this first
@@ -243,8 +326,10 @@ The AI still chooses its own words. The chart only controls what is **possible**
 $ dialtone flow show
 node           kind      collects       tools reachable here                 edges
 greet          speak                    —                                    3
-identify       collect   name           lookup_patient                       2
+reason         collect   reason         lookup_patient                       2
+preferred_day  collect   preferred_day  —                                    1
 offer_slots    tool                     check_availability                   3
+confirm        collect   confirmed      —                                    2
 book           tool                     book_appointment, send_confirmation  3
 handoff        transfer                 —                                    0
 goodbye        end                      —                                    0
@@ -252,6 +337,13 @@ goodbye        end                      —                                    0
 
 `book_appointment` exists at the `book` step and nowhere else. If the AI decides to book an
 appointment during the greeting, it cannot — the tool is not in the list it was given.
+
+**No step asks for the caller's name**, and that is the most important thing about this chart.
+One used to: *"Get the caller's full name for the booking"*, with a pattern to validate it and
+retries when it failed. It read well and it was wrong — a name spoken down a phone line and
+transcribed by a browser is not a name. A step's objective is the strongest instruction the model
+gets, so while that one existed, no rule anywhere else in the prompt could stop the agent asking.
+It asked on every single call. Deleting it is what fixed it.
 
 ![Node detail](docs/img/flow-node.png)
 
@@ -272,9 +364,17 @@ So every tool declares how slow it is:
 If the line drops between "book it" and the confirmation, the caller rings back. Without care,
 they get booked twice.
 
-Tools that change something — bookings, payments — get an **idempotency key**. Same key means
-same action, so it only happens once. There is a test for this, plus a second test proving it
-*does* double-book without the key. That way the first test is really measuring the guard.
+Two separate guards, because they fail in different ways:
+
+- **Within a call**, tools that change something get an **idempotency key**. Same key means same
+  action. There is a test for this, plus a second test proving it *does* double-book without the
+  key — otherwise the first test is not measuring the guard.
+- **Across calls**, `appointments.starts_at` is `UNIQUE`. Two callers can both be looking at the
+  same free slot; the database decides, and the second `INSERT` fails rather than succeeding
+  quietly.
+
+A caller who says *"yes, great, thanks"* three times has agreed once, and there is a test for
+that too.
 
 ---
 
@@ -318,17 +418,36 @@ services/gateway/src/dialtone/
 ├── turn/
 │   ├── endpointing.py    decides when the caller has finished
 │   └── bargein.py        handles interruptions and "mm-hmm"
+├── brain/
+│   ├── conversation.py   one call, start to finish
+│   ├── memory.py         what the agent knows, and how it came to know it
+│   ├── knowledge.py      retrieval over the company's own documents
+│   ├── grounding.py      checks every number the agent says against them
+│   ├── speakable.py      "$45" → "forty five dollars"
+│   └── llm.py            the local model, and the rules every agent gets
+├── scheduling/
+│   └── calendar.py       what is free, what is taken, "tomorrow morning" → a time
 ├── pipeline/             the listen → think → speak loop
 ├── flow/                 the flow chart and its rules
 ├── tools/                tool speed classes and safety guards
 ├── telephony/            phone line handling and the call simulator
 ├── compliance/           removing card numbers and personal data
+├── speech/               neural speech synthesis (Kokoro-82M)
+├── store/                SQLite: agents, calls, documents, appointments
 ├── eval/                 the benchmark and the test set
 ├── sim/                  full simulated calls
 ├── agents/               a complete worked example agent
 └── server/               the API for the web app
 
-apps/studio/src/          the web app (React + TypeScript)
+apps/studio/src/
+├── views/                one file per screen
+├── turntaking.ts         the browser half of the endpointer — pure, and tested
+├── voice.ts              microphone, echo guard, gapless audio playback
+└── transcript.ts         stripping "um" without stripping "very very"
+
+scripts/
+├── booking-e2e.py        a real call against the real model, then checks the database
+└── smoke.mjs             every screen in a real browser, with a fake microphone
 ```
 
 ### Where the time goes
@@ -352,13 +471,24 @@ agents feel like a walkie-talkie.
 
 ## Tests
 
-127 tests. Each is named after the problem it prevents, not the function it calls:
+204 in the gateway, 51 in the browser, plus two scripts that drive the whole thing for real.
+Each is named after the problem it prevents, not the function it calls:
 
 ```
 test_a_dropped_line_does_not_double_charge_the_caller
 test_history_records_what_the_caller_heard_not_what_was_generated
 test_a_spoken_card_does_not_destroy_the_following_word_boundary
 test_holding_through_a_number_costs_latency_and_that_is_the_point
+test_the_day_survives_the_turn_that_names_the_hour
+test_two_callers_cannot_have_the_same_slot
+test_a_time_that_does_not_exist_is_refused_even_on_a_free_day
+```
+
+```bash
+cd services/gateway && pytest          # 204
+cd apps/studio      && npm test        # 51
+npm run smoke                          # every screen, in Chromium, with a fake microphone
+python scripts/booking-e2e.py          # a real call, then a look in the database
 ```
 
 Some exist because the code was wrong first:
@@ -369,16 +499,24 @@ Some exist because the code was wrong first:
 | Audio length was counted as it played, not up front | Interruption handling silently did nothing at all |
 | Replaying a test call changed the test call | Running it twice tested less the second time |
 | One "mm-hmm" got counted 63 times | The check runs 50 times a second and nothing reset it |
+| The agent transcribed its own voice and replied to it | Open speakers. Flags went stale between audio chunks, so the guard now asks the audio clock |
+| One spoken sentence became four replies | Two clocks disagreed and nothing tracked what had already been sent |
+| `sam@example.com` set the appointment reason to "check-up" | "example" contains "exam", and the match was on substrings |
+| The caller was told a free morning was full | The prompt said so whenever they had not yet named an hour — which is most of the time |
 
 ---
 
 ## What this is not
 
-It does not include speech recognition, an AI model, or a voice synthesiser. It defines how those
-plug in, and measures **the gaps between them** — which is where phone agents actually break.
+**It is not a phone line.** Nothing here dials out or receives a real call. The telephony layer
+is an interface plus a simulator; connecting a provider like Twilio means implementing six
+functions. Everything above that layer is real.
 
-The phone-line layer is an interface plus a simulator. Connecting a real provider like Twilio
-means implementing six functions.
+**The model is small, and it shows.** Qwen2.5-1.5B runs on a laptop CPU, which is the point —
+you can run this repository without paying anyone. It is also why the code, not the model, holds
+every irreversible decision: the model proposes a time, the calendar decides whether that time
+exists, and the database decides whether it is still free. Watch it long enough and you will see
+it word something oddly. You will not see it book an appointment that does not exist.
 
 ---
 

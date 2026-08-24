@@ -180,7 +180,7 @@ body {
 .btn-danger:not(:disabled):hover { background: #1c0f13; }
 .btn-sm { padding: 4px 9px; font-size: 11.5px; }
 
-input[type='text'], input[type='number'], textarea, select {
+input[type='text'], input[type='number'], input[type='email'], input[type='tel'], textarea, select {
   width: 100%; background: var(--bg-0); color: var(--text);
   border: 1px solid var(--line-2); border-radius: var(--r-sm);
   padding: 8px 11px; font: inherit; font-size: 13px; outline: none;
@@ -332,3 +332,106 @@ code { font-family: var(--mono); font-size: 12px; background: var(--bg-0); borde
   .sidebar { display: none; }
   .page { padding: 18px 14px 44px; }
 }
+
+
+/* ── call / chat ─────────────────────────────────────────────────────────────
+ * A segmented control rather than a switch. The two modes are different products, not one
+ * behaviour with a setting, and a toggle labelled "voice" would suggest otherwise. */
+.seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--r); }
+.seg button {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 13px; border: 0;
+  border-radius: var(--r-sm); background: transparent; color: var(--text-2);
+  font: inherit; font-size: 12.5px; font-weight: 560; cursor: pointer;
+  transition: background .14s, color .14s, box-shadow .14s;
+}
+.seg button:hover:not(:disabled) { color: var(--text); }
+.seg button[data-on='true'] { background: var(--bg-3); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-2), 0 1px 2px rgba(0,0,0,.35); }
+.seg button[data-on='true'] svg { color: var(--accent); }
+.seg button:disabled { cursor: not-allowed; opacity: .55; }
+
+/* Dictation is a different act from talking to the agent, so it does not get the red
+ * recording ring — nothing is being sent, and a control that looks live when it is not is
+ * how the microphone came to feel unpredictable. */
+.mic[data-dictate='true'][data-on='true'] { background: var(--accent); border-color: var(--accent); color: #04201e; }
+.mic[data-dictate='true'][data-on='true']::after { border-color: var(--accent); }
+
+/* ── the side rail ───────────────────────────────────────────────────────── */
+.side-rail { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; padding-right: 2px; }
+.side-rail::-webkit-scrollbar { width: 7px; }
+.side-rail::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 99px; }
+
+.panel-note { margin: 0 0 11px; font-size: 11.5px; line-height: 1.55; color: var(--text-dim); }
+
+/* ── the details form ────────────────────────────────────────────────────── */
+.field { display: block; margin-bottom: 10px; }
+.field-l { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; font-size: 11.5px; font-weight: 560; color: var(--text-2); }
+.field input { width: 100%; }
+/* A value the agent thinks it heard. Amber rather than red: it is a guess, not an error, and
+ * the caller only needs to glance at it. */
+.field input[data-heard] { border-color: #46381c; background: #16120a; }
+.field-hint { font-style: normal; font-weight: 500; font-size: 10.5px; color: var(--cost); }
+.tick { display: grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; background: #0c1c14; color: var(--good); }
+
+.btn-wide { width: 100%; justify-content: center; margin-top: 4px; }
+
+/* ── what the agent knows ────────────────────────────────────────────────── */
+.know { display: inline-flex; align-items: center; gap: 7px; color: var(--text); font-weight: 500; }
+.know i { font-style: normal; font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; padding: 1px 5px; border-radius: 99px; border: 1px solid var(--line-2); color: var(--text-3); }
+.know[data-confirmed='true'] i { color: var(--good); border-color: #1e4030; background: #0c1c14; }
+.know[data-confirmed='false'] i { color: var(--cost); border-color: #46381c; background: #1c1508; }
+
+/* ── the booking ─────────────────────────────────────────────────────────────
+ * Deliberately the loudest thing on the screen. It is the one outcome of the call that
+ * outlives it, and everything else in this rail is instrumentation. */
+.booked-card {
+  border: 1px solid #1e4030; border-radius: var(--r); padding: 15px 16px;
+  background: linear-gradient(160deg, #0d2118, var(--bg-1) 72%);
+  box-shadow: var(--shadow); animation: booked-in .34s cubic-bezier(.2,.8,.3,1);
+}
+@keyframes booked-in { from { opacity: 0; transform: translateY(-6px) scale(.985); } }
+.booked-h { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 620; letter-spacing: .08em; text-transform: uppercase; color: var(--good); }
+.booked-when { margin-top: 9px; font-size: 17px; font-weight: 620; letter-spacing: -.015em; color: var(--text); }
+.booked-meta { margin-top: 3px; font-size: 12px; color: var(--text-dim); }
+.booked-row { display: flex; justify-content: space-between; gap: 12px; margin-top: 9px; padding-top: 9px; border-top: 1px solid #16301f; font-size: 12.5px; color: var(--text-2); }
+.booked-row + .booked-row { margin-top: 0; }
+.booked-row b { color: var(--text); font-weight: 560; font-family: var(--mono); font-size: 12px; }
+
+/* ── availability ────────────────────────────────────────────────────────── */
+.slots { display: flex; flex-wrap: wrap; gap: 6px; }
+.slot {
+  display: inline-flex; align-items: baseline; gap: 6px; padding: 5px 9px;
+  border: 1px solid var(--line-2); border-radius: var(--r-sm); background: var(--bg-2);
+  font-size: 11px; color: var(--text-dim); white-space: nowrap;
+}
+.slot b { font-family: var(--mono); font-size: 12px; font-weight: 560; color: var(--text); }
+
+
+/* ── the diary ───────────────────────────────────────────────────────────── */
+.appt-grid { display: grid; grid-template-columns: 1fr 340px; gap: 14px; align-items: start; }
+@media (max-width: 1100px) { .appt-grid { grid-template-columns: 1fr; } }
+
+.appt-day + .appt-day { margin-top: 18px; }
+.appt-day-h {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding-bottom: 7px;
+  border-bottom: 1px solid var(--line); font-size: 11px; font-weight: 620;
+  letter-spacing: .07em; text-transform: uppercase; color: var(--text-3);
+}
+
+.appt {
+  display: grid; grid-template-columns: 56px 1fr auto; align-items: center; gap: 12px;
+  padding: 10px 11px; border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--bg-2); transition: border-color .14s, background .14s;
+}
+.appt + .appt { margin-top: 6px; }
+.appt:hover { border-color: var(--line-2); background: var(--bg-3); }
+.appt[data-status='cancelled'] { opacity: .45; }
+.appt-time { font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--accent); }
+.appt-who { font-size: 13.5px; font-weight: 560; color: var(--text); }
+.appt-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 2px; font-size: 11.5px; color: var(--text-dim); }
+.appt-right { display: flex; align-items: center; gap: 8px; }
+.ref { font-family: var(--mono); font-size: 11px; letter-spacing: .04em; padding: 3px 7px; border-radius: var(--r-sm); background: var(--bg-0); border: 1px solid var(--line-2); color: var(--text-2); }
+.trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; }
+
+.skeleton-list { display: flex; flex-direction: column; gap: 6px; }
+.skeleton-list i { height: 54px; border-radius: var(--r); background: linear-gradient(90deg, var(--bg-2), var(--bg-3), var(--bg-2)); background-size: 200% 100%; animation: shimmer 1.3s linear infinite; }
+@keyframes shimmer { to { background-position: -200% 0; } }

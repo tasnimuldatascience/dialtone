@@ -8,6 +8,7 @@ import { LiveCall } from './views/LiveCall'
 import { Agents } from './views/Agents'
 import { Knowledge } from './views/Knowledge'
 import { Calls } from './views/Calls'
+import { Appointments } from './views/Appointments'
 import { Numbers } from './views/Numbers'
 import { FlowStudio } from './views/FlowStudio'
 import { Benchmark } from './views/Benchmark'
@@ -20,6 +21,7 @@ export type Route =
   | { view: 'knowledge' }
   | { view: 'flow' }
   | { view: 'calls'; callId?: string }
+  | { view: 'appointments' }
   | { view: 'numbers' }
   | { view: 'benchmark' }
   | { view: 'compliance' }
@@ -30,6 +32,7 @@ const NAV: { group: string; items: { view: Route['view']; label: string; icon: I
     items: [
       { view: 'dashboard', label: 'Dashboard', icon: 'grid' },
       { view: 'live', label: 'Live call', icon: 'phone' },
+      { view: 'appointments', label: 'Appointments', icon: 'calendar' },
       { view: 'calls', label: 'Call history', icon: 'list' },
     ],
   },
@@ -54,6 +57,7 @@ const NAV: { group: string; items: { view: Route['view']; label: string; icon: I
 const TITLES: Record<Route['view'], string> = {
   dashboard: 'Dashboard',
   live: 'Live call',
+  appointments: 'Appointments',
   calls: 'Call history',
   agents: 'Agents',
   knowledge: 'Knowledge',
@@ -238,6 +242,7 @@ export function App() {
         <div className="content">
           {route.view === 'dashboard' && <Dashboard {...shared} />}
           {route.view === 'live' && <LiveCall {...shared} />}
+          {route.view === 'appointments' && <Appointments {...shared} />}
           {route.view === 'calls' && <Calls {...shared} initialCallId={route.callId} />}
           {route.view === 'agents' && <Agents {...shared} />}
           {route.view === 'knowledge' && <Knowledge {...shared} />}

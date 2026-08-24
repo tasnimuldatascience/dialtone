@@ -24,6 +24,7 @@ import base64
 import logging
 import time
 from contextlib import asynccontextmanager, suppress
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -35,6 +36,8 @@ from ..compliance.redact import redact
 from ..eval.endpointing import CORPUS, ablate, run, sweep
 from ..flow.graph import GuardrailError
 from ..platform import Platform, _flow_from_dict, _flow_to_dict
+from ..scheduling.calendar import as_dict as as_slot_dict
+from ..scheduling.calendar import available
 from ..sim.call import CANNED_CALLS, replay
 from ..turn.endpointing import EndpointConfig, Endpointer, completion_score
 
@@ -269,6 +272,41 @@ def assign_number(number_id: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"assigned": P().store.assign_number(number_id, body.get("agent_id"))}
 
 
+# ── the appointment book ─────────────────────────────────────────────────────
+# The half of the product a caller can point at afterwards. A call that "went well" and left
+# nothing in a diary is a demo; these endpoints are what makes it a booking.
+@app.get("/api/agents/{agent_id}/availability")
+def availability(agent_id: str, limit: int = 24) -> dict[str, Any]:
+    """The open slots, exactly as the agent sees them on a live call.
+
+    Served from the same function the conversation uses, so the screen and the voice can never
+    disagree about what is free -- a caller told one thing and shown another rightly stops
+    trusting both.
+    """
+    store = P().store
+    if store.get_agent(agent_id) is None:
+        raise HTTPException(404, f"no agent {agent_id}")
+    today = date.today()
+    slots = available(store.taken_slots(), today=today, now=datetime.now())
+    return {
+        "today": today.isoformat(),
+        "open": [as_slot_dict(s, today) for s in slots[:limit]],
+        "total_open": len(slots),
+    }
+
+
+@app.get("/api/appointments")
+def list_appointments(agent_id: str | None = None, limit: int = 200) -> dict[str, Any]:
+    return {"appointments": P().store.list_appointments(agent_id=agent_id, limit=limit)}
+
+
+@app.delete("/api/appointments/{appointment_id}")
+def cancel_appointment(appointment_id: str) -> dict[str, Any]:
+    if not P().store.cancel_appointment(appointment_id):
+        raise HTTPException(404, f"no appointment {appointment_id}")
+    return {"cancelled": appointment_id}
+
+
 # ── calls ────────────────────────────────────────────────────────────────────
 @app.get("/api/calls")
 def list_calls(agent_id: str | None = None, limit: int = 100,
@@ -311,6 +349,48 @@ def end_call(call_id: str) -> dict[str, Any]:
     if record is None:
         raise HTTPException(404, f"no live call {call_id}")
     return record
+
+
+class DetailsIn(BaseModel):
+    """What the caller typed rather than said."""
+
+    name: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    reason: str | None = None
+
+
+@app.get("/api/calls/{call_id}/memory")
+def call_memory(call_id: str) -> dict[str, Any]:
+    """Everything the agent believes about this call, and how it came to believe it."""
+    live = P().live_call(call_id)
+    if live is None:
+        raise HTTPException(404, f"no live call {call_id}")
+    return live.conversation.memory.as_dict()
+
+
+@app.patch("/api/calls/{call_id}/details")
+def set_details(call_id: str, body: DetailsIn) -> dict[str, Any]:
+    """Take the caller's details from the form instead of from the microphone.
+
+    Speech recognition mangles precisely the values that have to be exact -- one real call
+    produced "tasty mulasson" for a surname and "abc iphone com" for an email address. Typing
+    them is not a lesser path to the same place; it is the only way those fields are ever right,
+    which is why a typed value outranks anything heard and the agent stops asking once it is in.
+    """
+    live = P().live_call(call_id)
+    if live is None:
+        raise HTTPException(404, f"no live call {call_id}")
+
+    memory = live.conversation.memory
+    for field_name, value in body.model_dump(exclude_none=True).items():
+        memory.tell(field_name, value, source="typed")
+
+    # Typing the last missing detail can be the thing that completes a booking, so the same
+    # check the conversation runs after a turn runs here too. Otherwise the caller fills the
+    # form, nothing happens, and they have to say "yes" again to a question already answered.
+    booked = live.conversation.book_if_ready()
+    return {"memory": memory.as_dict(), "booked": booked}
 
 
 @app.websocket("/ws/call/{call_id}")

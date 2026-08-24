@@ -155,6 +155,46 @@ export interface Campaign {
   reached: number
 }
 
+export interface Slot { iso: string; spoken: string; date: string; time: string }
+
+export interface Appointment {
+  id: string
+  agent_id: string
+  agent_name?: string
+  call_id: string | null
+  reference: string
+  starts_at: string
+  duration_min: number
+  patient_name: string
+  phone: string
+  email: string
+  reason: string
+  status: string
+  created_at: string
+}
+
+/** One thing the agent knows, and whether it is entitled to act on it. */
+export interface MemoryFact { value: string; source: string; confirmed: boolean }
+
+export interface CallMemory {
+  facts: Record<string, MemoryFact>
+  when: { day: string | null; hour: number | null; minute: number; part: string | null }
+  proposed_slot: string
+  slot_confirmed: boolean
+  booked_reference: string
+  missing: string[]
+  unconfirmed: string[]
+  ready_to_book: boolean
+}
+
+export interface Booked {
+  reference: string
+  starts_at: string
+  spoken: string
+  name: string
+  reason: string
+}
+
 export interface BenchResult {
   label: string
   false_cutoff_rate: number
@@ -227,6 +267,21 @@ export const api = {
   call: (id: string) => get<CallDetail>(`/api/calls/${id}`),
   startCall: (agentId: string, channel = 'text') =>
     post<{ call_id: string; greeting: string }>('/api/calls', { agent_id: agentId, channel }),
+
+  /* The diary. Served from the same function the agent reads on a live call, so the screen and
+   * the voice cannot disagree about what is free. */
+  availability: (agentId: string) =>
+    get<{ today: string; open: Slot[]; total_open: number }>(`/api/agents/${agentId}/availability`),
+  appointments: (agentId?: string) =>
+    get<{ appointments: Appointment[] }>(
+      `/api/appointments${agentId ? `?agent_id=${agentId}` : ''}`,
+    ),
+  cancelAppointment: (id: string) => del<{ cancelled: string }>(`/api/appointments/${id}`),
+
+  callMemory: (callId: string) => get<CallMemory>(`/api/calls/${callId}/memory`),
+  /* Typed details outrank anything the microphone heard. See the endpoint for why. */
+  setDetails: (callId: string, body: { name?: string; phone?: string; email?: string; reason?: string }) =>
+    patch<{ memory: CallMemory; booked: Booked | null }>(`/api/calls/${callId}/details`, body),
 
   campaigns: () => get<{ campaigns: Campaign[] }>('/api/campaigns'),
   createCampaign: (agentId: string, name: string) =>

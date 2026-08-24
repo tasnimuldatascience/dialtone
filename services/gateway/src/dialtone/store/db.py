@@ -103,6 +103,26 @@ CREATE TABLE IF NOT EXISTS turns (
 );
 CREATE INDEX IF NOT EXISTS idx_turns_call ON turns(call_id);
 
+CREATE TABLE IF NOT EXISTS appointments (
+    id          TEXT PRIMARY KEY,
+    agent_id    TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    call_id     TEXT REFERENCES calls(id) ON DELETE SET NULL,
+    reference   TEXT NOT NULL UNIQUE,
+    -- ISO start time. UNIQUE because it is the whole booking guarantee: two callers cannot be
+    -- given the same slot, and enforcing that in the schema means a race between two live calls
+    -- fails loudly at insert rather than quietly double-booking.
+    starts_at   TEXT NOT NULL UNIQUE,
+    duration_min INTEGER NOT NULL DEFAULT 30,
+    patient_name TEXT NOT NULL DEFAULT '',
+    phone       TEXT NOT NULL DEFAULT '',
+    email       TEXT NOT NULL DEFAULT '',
+    reason      TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'booked',   -- booked | cancelled | attended | no_show
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_appt_starts ON appointments(starts_at);
+CREATE INDEX IF NOT EXISTS idx_appt_agent  ON appointments(agent_id);
+
 CREATE TABLE IF NOT EXISTS campaigns (
     id          TEXT PRIMARY KEY,
     agent_id    TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -428,6 +448,74 @@ class Store:
             )
             self._db.commit()
 
+    # -- appointments ------------------------------------------------------
+    def taken_slots(self, *, from_iso: str = "") -> set[str]:
+        """Start times that are already booked. The only thing the calendar needs from here."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT starts_at FROM appointments WHERE status = 'booked' AND starts_at >= ?",
+                (from_iso,),
+            ).fetchall()
+        return {r["starts_at"] for r in rows}
+
+    def book(self, agent_id: str, starts_at: str, **fields: Any) -> dict[str, Any] | None:
+        """Reserve a slot. Returns None if somebody else already has it.
+
+        The UNIQUE constraint on `starts_at` is what makes this safe rather than the check above
+        it: two calls can both find a slot free and both try to take it, and only one insert can
+        win. Returning None instead of raising lets the agent say "that just went" and offer
+        another, which is what a receptionist would do.
+        """
+        appointment_id = _uid("apt")
+        reference = f"NG{uuid.uuid4().hex[:6].upper()}"
+        try:
+            with self._lock:
+                self._db.execute(
+                    "INSERT INTO appointments (id,agent_id,call_id,reference,starts_at,"
+                    "duration_min,patient_name,phone,email,reason,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (appointment_id, agent_id, fields.get("call_id"), reference, starts_at,
+                     int(fields.get("duration_min", 30)), fields.get("patient_name", ""),
+                     fields.get("phone", ""), fields.get("email", ""), fields.get("reason", ""),
+                     _now()),
+                )
+                self._db.commit()
+        except sqlite3.IntegrityError:
+            return None
+        return self.appointment(appointment_id)
+
+    def appointment(self, appointment_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM appointments WHERE id = ?", (appointment_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_appointments(self, *, agent_id: str | None = None, upcoming: bool = False,
+                          limit: int = 200) -> list[dict[str, Any]]:
+        where, params = ["1=1"], []
+        if agent_id:
+            where.append("a.agent_id = ?")
+            params.append(agent_id)
+        if upcoming:
+            where.append("a.starts_at >= ?")
+            params.append(datetime.now(UTC).isoformat(timespec="minutes")[:16])
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT a.*, g.name AS agent_name FROM appointments a "
+                f"LEFT JOIN agents g ON g.id = a.agent_id "
+                f"WHERE {' AND '.join(where)} ORDER BY a.starts_at LIMIT ?", (*params, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def cancel_appointment(self, appointment_id: str) -> bool:
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE appointments SET status = 'cancelled' WHERE id = ?", (appointment_id,)
+            )
+            self._db.commit()
+        return cur.rowcount > 0
+
     # -- analytics ---------------------------------------------------------
     def overview(self) -> dict[str, Any]:
         """Headline numbers for the dashboard.
@@ -449,6 +537,9 @@ class Store:
                 "SELECT COUNT(*) AS n FROM calls WHERE ended_at IS NULL"
             ).fetchone()["n"]
             docs = self._db.execute("SELECT COUNT(*) AS n FROM documents").fetchone()["n"]
+            booked = self._db.execute(
+                "SELECT COUNT(*) AS n FROM appointments WHERE status = 'booked'"
+            ).fetchone()["n"]
 
             # Median rather than mean for latency. One 9-second turn where a tool timed out
             # drags a mean far enough to hide that every other turn was fine.
@@ -475,6 +566,7 @@ class Store:
             "live": live,
             "agents": agents,
             "documents": docs,
+            "appointments": booked,
             "resolved": totals["resolved"],
             "escalated": totals["escalated"],
             "abandoned": totals["abandoned"],

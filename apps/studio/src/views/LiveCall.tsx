@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ViewProps } from '../App'
-import { api, openCall, type Grounding, type Hit, type Timing } from '../api'
+import { api, openCall, type Booked, type CallMemory, type Grounding, type Hit, type Slot, type Timing } from '../api'
 import { Icon } from '../components/Icon'
 import { AudioQueue, Listener, MicLevel, clearSpokenMemory, inEchoWindow, loadVoices, looksLikeEcho, rememberSpoken, resetEchoWindow, setAgentAudioProbe, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
 import { decideTurn } from '../turntaking'
@@ -16,7 +16,25 @@ import { cleanTranscript, endsOnFiller } from '../transcript'
  * VOICE USES THE BROWSER'S ENGINES but NOT its turn-taking. Web Speech will happily tell you
  * when it thinks the caller stopped; that decision is the whole subject of this project, so the
  * transcript is streamed to our own endpointer and the browser's opinion is ignored.
+ *
+ * TWO MODES, AND THE MICROPHONE MEANS SOMETHING DIFFERENT IN EACH. They are not a preference
+ * toggle over one behaviour — they are two products, and conflating them is what made the
+ * microphone feel broken:
+ *
+ *   CALL   Hands-free. The agent speaks, the microphone stays open, and the endpointer decides
+ *          when the caller has finished. Nobody presses anything. Every hard problem in this
+ *          repo lives here.
+ *   CHAT   Typed. The agent stays silent. The microphone is DICTATION ONLY: it fills the box and
+ *          stops there, and you press send. A half-heard sentence costs a backspace instead of
+ *          a wasted turn, which is the entire reason the two are separate.
+ *
+ * NAMES, PHONE NUMBERS AND EMAIL ADDRESSES ARE TYPED IN BOTH. Recognition mangles precisely the
+ * values that have to be exact — one real call produced "tasty mulasson" for a surname. The form
+ * on the right is not a fallback for when the voice fails; it is the only path those fields ever
+ * take, and a typed value outranks anything the agent thinks it heard.
  */
+
+type Mode = 'call' | 'chat'
 
 interface Line {
   who: 'caller' | 'agent'
@@ -36,10 +54,13 @@ type Phase = 'idle' | 'connecting' | 'live' | 'ended'
 
 export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProps) {
   const [phase, setPhase] = useState<Phase>('idle')
+  const [mode, setMode] = useState<Mode>('call')
+  const [callId, setCallId] = useState('')
   const [lines, setLines] = useState<Line[]>([])
   const [draft, setDraft] = useState('')
   const [thinking, setThinking] = useState(false)
-  const [voiceOn, setVoiceOn] = useState(false)
+  const [memory, setMemory] = useState<CallMemory | null>(null)
+  const [booked, setBooked] = useState<Booked | null>(null)
   const [micOn, setMicOn] = useState(false)
   const [level, setLevel] = useState(0)
   const [partial, setPartial] = useState('')
@@ -51,6 +72,10 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   const [turnReason, setTurnReason] = useState('')
   const [voiceEngine, setVoiceEngine] = useState<'kokoro-82m' | 'browser'>('browser')
   const [firstAudioMs, setFirstAudioMs] = useState<number | null>(null)
+
+  // Not a setting. In Chat the agent is silent and the microphone only ever fills the box, so
+  // there is nothing left for a "speak replies" switch to mean.
+  const voiceOn = mode === 'call'
 
   const socket = useRef<ReturnType<typeof openCall> | null>(null)
   const listener = useRef<Listener | null>(null)
@@ -68,6 +93,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   // sets it is async -- so a call started before it resolved captured 'browser', spoke the
   // greeting with the robotic voice, and fed it straight back into the microphone.
   const engine = useRef<'kokoro-82m' | 'browser'>('browser')
+  const greetingGuard = useRef(0)
   // Last threshold the gateway gave us, and when. Speech recognition emits a partial per word,
   // so scoring every one meant a network round trip per syllable -- several a second, each one
   // delaying the timer it was supposed to be arming.
@@ -137,6 +163,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     meter.current = null
     stopSpeaking()
     window.clearTimeout(silenceTimer.current)
+    window.clearTimeout(greetingGuard.current)
   }, [])
 
   useEffect(() => teardown, [teardown])
@@ -228,21 +255,47 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     setMicOn(true)
   }, [rescore])
 
+  /* DICTATION. The microphone in Chat mode, and nothing else.
+   *
+   * It writes into the box and stops. It does not decide when you have finished, it does not
+   * send, and it cannot start a turn — so a sentence the recogniser mangles costs a backspace
+   * rather than a wasted exchange with the agent. That is the whole difference between the two
+   * modes, and the reason the endpointer is not wired up here: there is nothing for it to
+   * decide when a human is going to press send.
+   */
+  const startDictation = useCallback(async () => {
+    if (listener.current) return
+    listener.current = new Listener({
+      // Fillers stripped as they arrive. In a call they are load-bearing — "um" is what tells
+      // the endpointer somebody is mid-thought — but in a box being typed into they are just
+      // noise the caller has to delete.
+      onPartial: (text) => setDraft(cleanTranscript(text) || text),
+    })
+    listener.current.start()
+    meter.current = new MicLevel()
+    void meter.current.start(setLevel)
+    setMicOn(true)
+  }, [])
+
   const toggleMic = useCallback(async () => {
     if (micOn) stopMic()
+    else if (mode === 'chat') await startDictation()
     else await startMic()
-  }, [micOn, startMic, stopMic])
+  }, [micOn, mode, startMic, startDictation, stopMic])
 
   const start = useCallback(async () => {
     if (!agentId) return
     setPhase('connecting')
     setLines([])
     setSummary(null)
+    setMemory(null)
+    setBooked(null)
     clearSpokenMemory()
     resetEchoWindow()
     sentSoFar.current = ''
     try {
       const { call_id, greeting } = await api.startCall(agentId, voiceOn ? 'voice' : 'text')
+      setCallId(call_id)
       setLines([{ who: 'agent', text: greeting }])
       rememberSpoken(greeting)
       // The gateway synthesises the greeting itself when the neural voice is loaded, so this
@@ -314,26 +367,61 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
           // Fall back to the browser's own voice rather than going silent. Worse, and audible.
           setVoiceEngine('browser')
         }
+        // What the agent now believes about the caller, pushed on every turn rather than
+        // polled. The panel showing it is the answer to "did it actually hear my phone number",
+        // which on a voice call is otherwise unanswerable until the booking is wrong.
+        if (event.memory) setMemory(event.memory as unknown as CallMemory)
+        if (type === 'booked') setBooked(event as unknown as Booked)
         if (type === 'summary') { setSummary(event); setPhase('ended') }
         if (type === 'ended') setPhase('ended')
       }, () => setPhase('ended'))
 
       setPhase('live')
 
-      // A voice call opens with the microphone live. Requiring a second click before the agent
-      // can hear anything is not how a telephone behaves, and it is the first thing anyone
-      // trying this trips over.
-      if (voiceOn && speechSupported()) {
-        void startMic()
+      // A voice call opens with the microphone live -- but NOT until the greeting has finished
+      // playing. Starting it immediately meant the recogniser was already running when the
+      // greeting came out of the speakers, and it transcribed it: a real call began with
+      // "Northgate dental can i help hello my name is..." as the caller's first turn.
+      //
+      // The echo window cannot help here, because the microphone was listening before there was
+      // any audio to detect. The only reliable answer is not to open it yet.
+      // Call mode only. In Chat the microphone belongs to whoever presses the button.
+      if (mode === 'call' && speechSupported()) {
+        greetingGuard.current = window.setTimeout(
+          () => { void startMic() },
+          // Generous: the greeting is synthesised on demand, so its length is not known here.
+          // A second of extra silence at the start of a call costs nothing; a greeting recorded
+          // as caller speech derails the whole conversation.
+          engine.current === 'kokoro-82m' ? 4200 : 2600,
+        )
       }
     } catch (error) {
       setLines([{ who: 'agent', text: `Could not start the call: ${String(error)}` }])
       setPhase('idle')
     }
-  }, [agentId, agent, voiceOn, startMic])
+  }, [agentId, agent, mode, voiceOn, startMic])
+
+  const changeMode = useCallback((next: Mode) => {
+    if (next === mode) return
+    teardown()
+    setMode(next)
+    // Back to the beginning, deliberately. The transcript on screen belongs to the mode that
+    // produced it, and carrying it over left the button reading "Start again" for something the
+    // caller had not started yet.
+    setPhase('idle')
+    setLines([])
+    setSummary(null)
+    setMemory(null)
+    setBooked(null)
+    setDraft('')
+    setPartial('')
+    setMicOn(false)
+    setLevel(0)
+  }, [mode, teardown])
 
   const hangup = useCallback(() => {
     socket.current?.hangup()
+    window.clearTimeout(greetingGuard.current)
     stopMic()
     stopSpeaking()
     audio.current?.stop()
@@ -360,7 +448,8 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
    *                                turned "hi, how are you doing?" into four separate turns.
    */
   useEffect(() => {
-    if (!micOn || phase !== 'live') return
+    // Chat has no turn-taking to do. The caller presses send; that IS the endpoint.
+    if (!micOn || phase !== 'live' || mode !== 'call') return
     const timer = window.setInterval(() => {
       // Polled every 60ms, which is also what keeps the echo window's clock current.
       if (inEchoWindow()) {
@@ -412,7 +501,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
       }
     }, 60)
     return () => window.clearInterval(timer)
-  }, [micOn, phase, agentSpeaking, send])
+  }, [micOn, phase, mode, agentSpeaking, send])
 
   const live = phase === 'live'
 
@@ -431,10 +520,18 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
             ))}
           </select>
 
-          <label className="switch">
-            <input type="checkbox" checked={voiceOn} onChange={(e) => setVoiceOn(e.target.checked)} disabled={live} />
-            Speak replies
-          </label>
+          <div className="seg" role="tablist" aria-label="How to talk to the agent">
+            <button role="tab" aria-selected={mode === 'call'} data-on={mode === 'call'}
+                    disabled={live} onClick={() => changeMode('call')}
+                    title="Hands-free. The agent speaks and decides when you have finished.">
+              <Icon name="phone" size={13} /> Call
+            </button>
+            <button role="tab" aria-selected={mode === 'chat'} data-on={mode === 'chat'}
+                    disabled={live} onClick={() => changeMode('chat')}
+                    title="Typed. The agent stays silent; the microphone only fills the box.">
+              <Icon name="chat" size={13} /> Chat
+            </button>
+          </div>
 
           {voiceOn && (
             <span className="chip" data-t={voiceEngine === 'kokoro-82m' ? 'agent' : undefined}
@@ -455,13 +552,17 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
         <div className="row">
           {!live && (
             <button className="btn btn-primary" onClick={() => void start()} disabled={!ready || !agentId || phase === 'connecting'}>
-              <Icon name="phone" />
-              {phase === 'connecting' ? 'Connecting…' : phase === 'ended' ? 'Call again' : 'Start call'}
+              <Icon name={mode === 'call' ? 'phone' : 'chat'} />
+              {phase === 'connecting'
+                ? 'Connecting…'
+                : phase === 'ended'
+                  ? (mode === 'call' ? 'Call again' : 'Start again')
+                  : (mode === 'call' ? 'Start call' : 'Start chat')}
             </button>
           )}
           {live && (
             <button className="btn btn-danger" onClick={hangup}>
-              <Icon name="x" /> Hang up
+              <Icon name="x" /> {mode === 'call' ? 'Hang up' : 'End chat'}
             </button>
           )}
         </div>
@@ -479,8 +580,12 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
           <div className="tr-body" ref={body}>
             {lines.length === 0 && (
               <div className="empty">
-                <h3>No call in progress</h3>
-                Press <b>Start call</b>, then type — or turn on the microphone and talk.
+                <h3>{mode === 'call' ? 'No call in progress' : 'No chat in progress'}</h3>
+                {mode === 'call'
+                  ? <>Press <b>Start call</b> and just talk. The agent replies out loud and works
+                      out when you have finished on its own — there is nothing to press.</>
+                  : <>Press <b>Start chat</b> and type. The agent stays silent. The microphone
+                      dictates into the box; you decide when to send it.</>}
               </div>
             )}
 
@@ -522,10 +627,22 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
             <div className="composer">
               {speechSupported() && (
                 <div className="mic-wrap">
-                  <button className="mic" data-on={micOn} onClick={() => void toggleMic()} disabled={!live} title={micOn ? 'Stop listening' : 'Talk to the agent'}>
+                  <button
+                    className="mic" data-on={micOn} data-dictate={mode === 'chat'}
+                    onClick={() => void toggleMic()} disabled={!live}
+                    title={mode === 'chat'
+                      ? (micOn ? 'Stop dictating' : 'Dictate into the box — nothing is sent until you press send')
+                      : (micOn ? 'Stop listening' : 'Talk to the agent')}
+                  >
                     <Icon name={micOn ? 'mic' : 'mic-off'} size={17} />
                   </button>
                 </div>
+              )}
+
+              {mode === 'chat' && micOn && (
+                <span className="chip" style={{ flexShrink: 0 }}>
+                  <Icon name="mic" size={11} /> dictating — press send when you are ready
+                </span>
               )}
 
               {micOn && agentSpeaking && (
@@ -534,7 +651,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
                 </span>
               )}
 
-              {micOn && !agentSpeaking && (
+              {micOn && !agentSpeaking && mode === 'call' && (
                 <div className="level" aria-hidden>
                   {Array.from({ length: 12 }, (_, i) => (
                     <i key={i} style={{ height: `${Math.max(3, Math.min(22, level * 26 * (1 - Math.abs(i - 5.5) / 9)))}px` }} />
@@ -544,7 +661,13 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
 
               <textarea
                 value={draft}
-                placeholder={live ? 'Type what the caller says…' : 'Start a call first'}
+                placeholder={
+                  !live
+                    ? (mode === 'call' ? 'Start a call first' : 'Start a chat first')
+                    : mode === 'chat'
+                      ? 'Type your message, or use the microphone to dictate it…'
+                      : 'Or type instead of speaking…'
+                }
                 disabled={!live}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => {
@@ -565,6 +688,9 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
         <SidePanel
           lines={lines} summary={summary} firstToken={firstToken}
           firstAudioMs={firstAudioMs} voiceOn={voiceOn} voiceEngine={voiceEngine}
+          mode={mode} live={live} callId={callId} agentId={agentId}
+          memory={memory} booked={booked}
+          onMemory={setMemory} onBooked={setBooked}
         />
       </div>
     </div>
@@ -628,6 +754,7 @@ const STAGES: { key: keyof Timing; label: string; colour: string }[] = [
 
 function SidePanel({
   lines, summary, firstToken, firstAudioMs, voiceOn, voiceEngine,
+  mode, live, callId, agentId, memory, booked, onMemory, onBooked,
 }: {
   lines: Line[]
   summary: Record<string, unknown> | null
@@ -635,6 +762,14 @@ function SidePanel({
   firstAudioMs: number | null
   voiceOn: boolean
   voiceEngine: 'kokoro-82m' | 'browser'
+  mode: Mode
+  live: boolean
+  callId: string
+  agentId: string
+  memory: CallMemory | null
+  booked: Booked | null
+  onMemory: (m: CallMemory) => void
+  onBooked: (b: Booked) => void
 }) {
   const timed = lines.filter((l) => l.timing)
   const last = timed[timed.length - 1]?.timing
@@ -644,7 +779,18 @@ function SidePanel({
   const sources = new Set(lines.flatMap((l) => l.citations?.map((c) => c.document) ?? []))
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0 }}>
+    <div className="side-rail">
+      {booked && <BookingCard booked={booked} />}
+
+      <DetailsForm
+        live={live} callId={callId} memory={memory}
+        onMemory={onMemory} onBooked={onBooked}
+      />
+
+      {live && <WhatItKnows memory={memory} mode={mode} />}
+
+      <Availability agentId={agentId} bookedRef={booked?.reference ?? ''} />
+
       <div className="panel">
         <div className="panel-h"><Icon name="clock" size={13} /> Last turn</div>
         <div className="panel-b">
@@ -739,6 +885,235 @@ function SidePanel({
           <b>Microphone input needs Chrome or Edge.</b> Typing works everywhere.
         </div>
       )}
+    </div>
+  )
+}
+
+
+/* ── the details form ────────────────────────────────────────────────────────
+ *
+ * WHY THE CALLER TYPES THESE. Speech recognition is good at sentences and bad at strings, and a
+ * name, a phone number and an email address are strings. One real call produced "tasty mulasson"
+ * for a surname and "abc iphone com" for an email address — both plausible English, both wrong,
+ * and neither detectable from the transcript.
+ *
+ * So the agent never asks for them out loud. It fills in what it thinks it heard, marks that as
+ * heard rather than known, and a typed value replaces it permanently. Nothing is ever booked on
+ * a value the caller has not seen written down.
+ */
+function DetailsForm({
+  live, callId, memory, onMemory, onBooked,
+}: {
+  live: boolean
+  callId: string
+  memory: CallMemory | null
+  onMemory: (m: CallMemory) => void
+  onBooked: (b: Booked) => void
+}) {
+  const [form, setForm] = useState({ name: '', phone: '', email: '' })
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState('')
+
+  // Prefill from whatever the agent picked up, but ONLY into a field the caller has not touched.
+  // Overwriting a typed value with a heard one would undo the correction they just made, which
+  // is the exact opposite of what this form is for.
+  useEffect(() => {
+    if (!memory) return
+    setForm((current) => {
+      const next = { ...current }
+      for (const key of ['name', 'phone', 'email'] as const) {
+        const heard = memory.facts[key]?.value ?? ''
+        if (heard && !current[key]) next[key] = heard
+      }
+      return next
+    })
+  }, [memory])
+
+  const save = useCallback(async () => {
+    if (!callId) return
+    setSaving(true)
+    setError('')
+    try {
+      const result = await api.setDetails(callId, form)
+      onMemory(result.memory)
+      // Typing the last missing detail can be the thing that completes the booking, so the
+      // server books on the way through and says so. Making the caller repeat a "yes" they have
+      // already given is how software starts to feel like paperwork.
+      if (result.booked) onBooked(result.booked)
+      setSaved(true)
+      window.setTimeout(() => setSaved(false), 2200)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }, [callId, form, onMemory, onBooked])
+
+  const dirty = (['name', 'phone', 'email'] as const).some(
+    (k) => form[k].trim() && form[k].trim() !== memory?.facts[k]?.value,
+  )
+  const heardNotTyped = (k: 'name' | 'phone' | 'email') =>
+    Boolean(memory?.facts[k]?.value) && memory?.facts[k]?.confirmed === false
+
+  return (
+    <div className="panel">
+      <div className="panel-h"><Icon name="user" size={13} /> Your details</div>
+      <div className="panel-b">
+        <p className="panel-note">
+          Typed, not spoken. Names and numbers are what speech recognition gets wrong, so these
+          are the values the booking actually uses.
+        </p>
+
+        {(['name', 'phone', 'email'] as const).map((key) => (
+          <label key={key} className="field">
+            <span className="field-l">
+              {key === 'name' ? 'Full name' : key === 'phone' ? 'Phone' : 'Email'}
+              {memory?.facts[key]?.confirmed && <i className="tick"><Icon name="check" size={10} /></i>}
+              {heardNotTyped(key) && <em className="field-hint">heard — please check</em>}
+            </span>
+            <input
+              value={form[key]}
+              disabled={!live}
+              data-heard={heardNotTyped(key) || undefined}
+              placeholder={key === 'phone' ? '(212) 555-0142' : key === 'email' ? 'you@example.com' : 'Sam Hassan'}
+              inputMode={key === 'phone' ? 'tel' : undefined}
+              type={key === 'email' ? 'email' : 'text'}
+              onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
+              onKeyDown={(e) => { if (e.key === 'Enter') void save() }}
+            />
+          </label>
+        ))}
+
+        <button className="btn btn-primary btn-wide" disabled={!live || saving || !dirty} onClick={() => void save()}>
+          {saving ? 'Saving…' : saved ? 'Saved' : 'Save details'}
+        </button>
+        {error && <div className="note" data-t="bad" style={{ marginTop: 8, fontSize: 11.5 }}>{error}</div>}
+      </div>
+    </div>
+  )
+}
+
+
+/* What the agent is holding onto.
+ *
+ * The answer to "did it actually get my phone number", which on a voice call is otherwise
+ * unanswerable until the booking turns out to be wrong. Showing the SOURCE of each value, not
+ * just the value, is the point: heard and typed are different kinds of true.
+ */
+function WhatItKnows({ memory, mode }: { memory: CallMemory | null; mode: Mode }) {
+  if (!memory) return null
+  const facts = Object.entries(memory.facts).filter(([, f]) => f.value)
+  const when = memory.when
+  const hasWhen = Boolean(when.day || when.hour !== null || when.part)
+  if (!facts.length && !hasWhen && !memory.proposed_slot) return null
+
+  const timing = [
+    when.day
+      ? new Date(`${when.day}T00:00`).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })
+      : '',
+    when.hour !== null
+      ? `${String(when.hour).padStart(2, '0')}:${String(when.minute).padStart(2, '0')}`
+      : when.part ?? '',
+  ].filter(Boolean).join(' · ')
+
+  return (
+    <div className="panel">
+      <div className="panel-h"><Icon name="book" size={13} /> What the agent knows</div>
+      <div className="panel-b">
+        {facts.map(([key, fact]) => (
+          <div className="stat-line" key={key}>
+            <span style={{ textTransform: 'capitalize' }}>{key}</span>
+            <span className="know" data-confirmed={fact.confirmed}>
+              {fact.value}
+              <i>{fact.confirmed ? 'typed' : 'heard'}</i>
+            </span>
+          </div>
+        ))}
+        {timing && <div className="stat-line"><span>Wants</span><span>{timing}</span></div>}
+        {memory.proposed_slot && (
+          <div className="stat-line">
+            <span>On the table</span>
+            <span style={{ color: memory.slot_confirmed ? 'var(--good)' : 'var(--text-2)' }}>
+              {memory.proposed_slot}{memory.slot_confirmed ? ' · agreed' : ''}
+            </span>
+          </div>
+        )}
+        {memory.missing.length > 0 && !memory.booked_reference && (
+          <p className="panel-note" style={{ marginTop: 9, marginBottom: 0 }}>
+            Still needed: {memory.missing.join(', ')}.
+            {memory.missing.some((m) => m !== 'reason') && ' Fill those in above rather than saying them.'}
+          </p>
+        )}
+        {memory.unconfirmed.length > 0 && (
+          <p className="panel-note" style={{ marginTop: 9, marginBottom: 0, color: 'var(--cost)' }}>
+            {memory.unconfirmed.join(' and ')} {memory.unconfirmed.length > 1 ? 'were' : 'was'} heard,
+            not typed. Nothing is booked on a value you have not seen written down.
+          </p>
+        )}
+        {mode === 'call' && !facts.length && (
+          <p className="panel-note" style={{ marginBottom: 0 }}>Nothing picked up yet.</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
+function BookingCard({ booked }: { booked: Booked }) {
+  const at = new Date(booked.starts_at)
+  return (
+    <div className="booked-card">
+      <div className="booked-h"><Icon name="check" size={14} /> Appointment booked</div>
+      <div className="booked-when">{booked.spoken}</div>
+      <div className="booked-meta">
+        {at.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}
+        {' · '}
+        {at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+      </div>
+      <div className="booked-row"><span>Reference</span><b>{booked.reference}</b></div>
+      {booked.name && <div className="booked-row"><span>Name</span><b>{booked.name}</b></div>}
+      {booked.reason && <div className="booked-row"><span>For</span><b>{booked.reason}</b></div>}
+    </div>
+  )
+}
+
+
+/* The same open slots the agent is reading from, on screen at the same time.
+ *
+ * Served by an endpoint that calls the same function the conversation calls, so the two cannot
+ * drift. A caller told one thing and shown another stops believing both. */
+function Availability({ agentId, bookedRef }: { agentId: string; bookedRef: string }) {
+  const [slots, setSlots] = useState<Slot[]>([])
+  const [total, setTotal] = useState(0)
+
+  useEffect(() => {
+    if (!agentId) return
+    let alive = true
+    api.availability(agentId)
+      .then((r) => { if (alive) { setSlots(r.open.slice(0, 6)); setTotal(r.total_open) } })
+      .catch(() => undefined)
+    return () => { alive = false }
+    // bookedRef is a dependency so the list reflects the booking that just happened.
+  }, [agentId, bookedRef])
+
+  if (!slots.length) return null
+  return (
+    <div className="panel">
+      <div className="panel-h"><Icon name="clock" size={13} /> Next available</div>
+      <div className="panel-b">
+        <div className="slots">
+          {slots.map((s) => (
+            <span className="slot" key={s.iso} title={s.spoken}>
+              {new Date(`${s.date}T${s.time}`).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' })}
+              <b>{s.time}</b>
+            </span>
+          ))}
+        </div>
+        <p className="panel-note" style={{ marginTop: 9, marginBottom: 0 }}>
+          {total} open in the next fortnight — the same list the agent is reading from.
+        </p>
+      </div>
     </div>
   )
 }

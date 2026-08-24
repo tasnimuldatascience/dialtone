@@ -168,6 +168,19 @@ def build_flow() -> Flow:
     Note what is and is not specified: every node has an OBJECTIVE, never a script. The model
     picks the words. What the graph fixes is which tools exist here and which transitions are
     legal — the two things a caller-facing system cannot leave to sampling.
+
+    THERE IS NO NODE THAT ASKS FOR A NAME, and that is the most important thing about this
+    graph. There used to be: "Get the caller's full name for the booking", with a pattern to
+    validate it and retries when it failed. It read well and it was wrong, because a name spoken
+    down a phone line and transcribed by a browser is not a name — one real call recorded
+    "tasty mulasson" for a surname and "abc iphone com" for an email address, both of which pass
+    any pattern you would think to write.
+
+    So the caller types those, on screen, and the flow is about the only thing a conversation is
+    genuinely better at than a form: working out when somebody can come in. This is also why the
+    node objectives below say what NOT to ask. An objective is the strongest instruction the
+    model gets, and an objective that says "collect their name" beats any rule elsewhere in the
+    prompt telling it not to — which is exactly what happened before this was fixed.
     """
     return Flow(
         name="dental-booking",
@@ -184,22 +197,24 @@ def build_flow() -> Flow:
                     "Be brief — under two sentences."
                 ),
                 edges=(
-                    Edge("identify", when="the caller wants an appointment"),
+                    Edge("reason", when="the caller wants an appointment"),
                     Edge("handoff", when="the caller asks for a human, or sounds distressed"),
                     Edge("goodbye", when="the caller has no further business"),
                 ),
             ),
-            "identify": Node(
-                id="identify",
+            "reason": Node(
+                id="reason",
                 kind=NodeKind.COLLECT,
-                objective="Get the caller's full name for the booking.",
-                collects="name",
-                # Two words minimum. A single word is usually the recogniser dropping half.
-                pattern=r"^[A-Za-z][A-Za-z'\-]+(\s+[A-Za-z][A-Za-z'\-]+)+$",
+                objective=(
+                    "Find out what they need to come in for — a check-up, a cleaning, pain. "
+                    "One short question. Do NOT ask for their name, phone number or email; "
+                    "those are typed on screen and you will be told them."
+                ),
+                collects="reason",
                 tools=("lookup_patient",),
                 edges=(
-                    Edge("preferred_day", when="a plausible full name was collected"),
-                    Edge("handoff", when="the name could not be collected after several tries"),
+                    Edge("preferred_day", when="you know roughly what they need"),
+                    Edge("handoff", when="they are in severe pain or distressed"),
                 ),
             ),
             "preferred_day": Node(
@@ -207,7 +222,8 @@ def build_flow() -> Flow:
                 kind=NodeKind.COLLECT,
                 objective=(
                     "Find out roughly when they would like to come in. Accept vague answers "
-                    "like 'sometime next week' — do not insist on an exact date."
+                    "like 'sometime next week' — do not insist on an exact date. Do NOT ask "
+                    "for their name, phone number or email."
                 ),
                 collects="preferred_day",
                 edges=(Edge("offer_slots", when="any indication of timing was given"),),
@@ -216,8 +232,10 @@ def build_flow() -> Flow:
                 id="offer_slots",
                 kind=NodeKind.TOOL,
                 objective=(
-                    "Check availability and offer at most three slots. More than three cannot "
-                    "be held in memory over the phone and the caller will ask you to repeat."
+                    "Offer at most three of the times you have been given, and nothing else. "
+                    "More than three cannot be held in memory over the phone and the caller "
+                    "will ask you to repeat them. Do NOT ask for their name, phone number or "
+                    "email."
                 ),
                 # THE GUARDRAIL. `check_availability` exists here and nowhere else in the flow.
                 tools=("check_availability",),
@@ -231,7 +249,9 @@ def build_flow() -> Flow:
                 id="confirm",
                 kind=NodeKind.COLLECT,
                 objective=(
-                    "Read the chosen date and time back and get an explicit yes before booking."
+                    "Read the chosen date and time back and get an explicit yes before booking. "
+                    "The time is the ONLY thing to confirm — their details are already on file "
+                    "from the screen."
                 ),
                 collects="confirmed",
                 pattern=r"\b(yes|yeah|yep|correct|that's right|confirm|please do|go ahead)\b",
@@ -244,8 +264,9 @@ def build_flow() -> Flow:
                 id="book",
                 kind=NodeKind.TOOL,
                 objective=(
-                    "Book it, then give the reference number slowly. If the slot was taken in "
-                    "the meantime, apologise and offer the alternatives returned by the tool."
+                    "The appointment is already booked by the time you speak. Give the "
+                    "reference number slowly and confirm the time. If you are told the slot "
+                    "went in the meantime, apologise and offer another."
                 ),
                 tools=("book_appointment", "send_confirmation"),
                 edges=(

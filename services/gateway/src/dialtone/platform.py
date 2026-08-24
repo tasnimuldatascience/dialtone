@@ -55,6 +55,25 @@ class LiveCall:
         return int((time.perf_counter() - self.started) * 1000)
 
 
+@dataclass(slots=True)
+class StoreBooking:
+    """The store, in the shape a conversation needs to book with.
+
+    An adapter rather than passing the store straight in, for two reasons: the conversation
+    should not be able to reach the rest of the database, and this is where the agent is bound
+    to the booking, so a call cannot write an appointment against somebody else's practice.
+    """
+
+    store: Store
+    agent_id: str
+
+    def taken_slots(self) -> set[str]:
+        return self.store.taken_slots()
+
+    def book(self, starts_at: str, **fields: Any) -> dict[str, Any] | None:
+        return self.store.book(self.agent_id, starts_at, **fields)
+
+
 class Platform:
     """Everything the API serves, and everything that outlives a request."""
 
@@ -152,6 +171,7 @@ class Platform:
             tools=build_registry(),
             knowledge=self.knowledge_for(agent_id) if agent["use_knowledge"] else None,
             call_id=call_id,
+            booking=StoreBooking(self.store, agent_id),
         )
         greeting = conversation.opening()
         self.calls[call_id] = LiveCall(call_id, agent_id, conversation, channel=channel)

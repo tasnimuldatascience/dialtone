@@ -25,18 +25,33 @@ returning it whole would be four lines shorter and would cost ~400ms of dead air
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+
+# `time` is aliased: the stdlib `time` module is already imported above for perf_counter,
+# and datetime's `time` would shadow it.
+from datetime import date, datetime, timedelta
+from datetime import time as clock_time
+from typing import Any, Protocol
 
 from ..compliance.redact import redact
 from ..flow.graph import Flow, FlowRunner, GuardrailError, NodeKind
+from ..scheduling.calendar import (
+    EVENING_FROM,
+    Slot,
+    available,
+    match_slot,
+    offer_text,
+    suggest,
+)
 from ..tools.registry import ToolCall, ToolRegistry, ToolTrace
 from .grounding import Grounding
 from .grounding import check as check_grounding
 from .knowledge import Hit, KnowledgeBase
 from .llm import Brain, Turn, build_system_prompt, split_marker
+from .memory import CallMemory, summarise
 from .speakable import speakable
 
 log = logging.getLogger("dialtone.conversation")
@@ -147,6 +162,8 @@ class Conversation:
         tools: ToolRegistry | None = None,
         knowledge: KnowledgeBase | None = None,
         call_id: str = "call-1",
+        booking: BookingBackend | None = None,
+        today: date | None = None,
     ) -> None:
         self.brain = brain
         self.config = config
@@ -159,11 +176,139 @@ class Conversation:
         self.turns: list[TurnRecord] = []
         self.trace = ToolTrace()
         self.ended = False
+        #: Where appointments actually go. None means the agent may discuss times but not
+        #: commit to one, which is a legitimate configuration and must not look like a
+        #: broken booking.
+        self.booking = booking
+        self.today = today or date.today()
+        self.memory = CallMemory(today=self.today)
+
+    # -- scheduling ---------------------------------------------------------
+    def _now(self) -> datetime:
+        """The clock the diary is read against.
+
+        Tied to `today` rather than read fresh. A call pinned to a date -- a test, a replay of a
+        recorded call, a fixture -- must see the diary that date saw; reading the wall clock
+        while the date is fixed filters every slot out as already past, and the agent then tells
+        the caller it is fully booked for a fortnight.
+        """
+        real = datetime.now()
+        return real if real.date() == self.today else datetime.combine(self.today, clock_time(0, 1))
+
+    def open_slots(self) -> list[Slot]:
+        """Slots the practice can actually offer right now."""
+        if self.booking is None:
+            return []
+        return available(self.booking.taken_slots(), today=self.today, now=self._now())
+
+    def _scheduling_note(self) -> str:
+        """Real availability, phrased for the model.
+
+        GIVEN AS FACT RATHER THAN HIDDEN BEHIND A TOOL CALL. A small model asked to emit a
+        structured tool call gets it right often enough to demo and not often enough to ship,
+        and a missed call produces the exact sentence a real transcript captured: "I'm sorry,
+        but I don't have access to real-time scheduling information." The open slots are cheap
+        to compute and short to express, so the model is simply told them and cannot fail to
+        look them up.
+        """
+        if self.booking is None:
+            return ""
+
+        slots = self.open_slots()
+        if not slots:
+            return "Nothing is free in the next two weeks. Offer to take a number instead."
+
+        picks = suggest(self.memory.when, slots)
+        exact = match_slot(self.memory.when, slots)
+
+        # Whether the offer actually answers what they asked for. `suggest` deliberately falls
+        # back to other days rather than returning nothing -- a caller who wanted Tuesday will
+        # usually take Wednesday -- but the model has to be told WHICH of those two happened.
+        #
+        # It was not, and the result was a flat contradiction on a real call: the caller asked
+        # for tomorrow morning, tomorrow morning was free, and the agent said "we don't have
+        # available appointments for tomorrow morning" -- because the prompt said so. The
+        # earlier version announced "what they asked for is not free" whenever the hour was
+        # missing, which is most of the time, and the model repeated it.
+        want = self.memory.when
+        satisfied = (
+            bool(picks)
+            # An hour that was asked for and did not match is the whole answer. `exact` is None
+            # at this point, so if they named a time, that time is gone -- and saying "yes, that
+            # is available" because the DAY matched is how the agent came to offer eight o'clock
+            # at a practice that opens at half past.
+            and want.hour is None
+            and all(
+                (want.day is None or slot.start.date() == want.day)
+                and (want.part is None or _part_of(slot.start.hour) == want.part)
+                for slot in picks
+            )
+        )
+
+        # The date is stated three ways -- name, number, and what "tomorrow" resolves to --
+        # because a small model given only "Today is Sunday 23 August" still answered "today is
+        # already Saturday". Leaving it any room to reason about the calendar is leaving it room
+        # to be wrong about the one fact the caller will check.
+        tomorrow = self.today + timedelta(days=1)
+        lines = [
+            # THE JOB, FIRST. Everything below is detail; this is the sentence that stops the
+            # agent wandering off into collecting a phone number it cannot spell.
+            "YOUR ONLY JOB RIGHT NOW is to agree a time for the appointment.",
+            f"TODAY is {self.today.strftime('%A %d %B %Y')}. "
+            f"TOMORROW is {tomorrow.strftime('%A %d %B')}. "
+            f"Never contradict these two dates or work out a different one.",
+            "",
+            "REAL availability. These are the ONLY times you may offer, and you must not invent "
+            "or alter one:",
+            f"  {offer_text(picks, self.today)}",
+        ]
+
+        if exact:
+            self.memory.proposed_slot = exact.spoken(self.today)
+            lines.append(
+                f"The caller has asked for {exact.spoken(self.today)} and it IS free. Say that "
+                f"time back to them in one sentence and ask them to confirm it. Ask for nothing "
+                f"else."
+            )
+        elif satisfied and (want.day or want.part):
+            # They asked for a window and the window has slots in it. Say yes.
+            lines.append(
+                "What they asked for IS available -- the times above are exactly what they "
+                "asked for. Say yes and offer one or two of them. Never tell them there is "
+                "nothing free."
+            )
+        elif want.day or want.part:
+            lines.append(
+                "What they asked for is NOT free. Say so in half a sentence, then offer the "
+                "closest time from the list above."
+            )
+        else:
+            lines.append("Offer one or two of the times above.")
+
+        # THE FORM COLLECTS THE DETAILS, NOT THE CONVERSATION. Speech recognition mangles
+        # precisely the values that have to be exact -- a real call produced "tasty mulasson"
+        # for a surname and "abc iphone com" for an email address -- so the agent must not spend
+        # turns collecting them badly. It is also the difference between an agent that sounds
+        # like a receptionist and one that sounds like a form being read aloud.
+        lines.append(
+            "NEVER ask for a name, a phone number, an email address, or how to spell anything. "
+            "The caller types those on screen and you will be told them. Asking is WRONG even "
+            "if you do not know them yet. Talk only about the time."
+        )
+        return "\n".join(lines)
 
     # -- prompt ------------------------------------------------------------
     def _system_prompt(self, knowledge_text: str) -> str:
         node = self.runner.node(self.state) if self.runner and self.state else None
         transitions = [e.to for e in node.edges] if node else []
+
+        # Memory first, then availability. Both are FACTS about this call and neither is
+        # optional -- the model is not being asked to remember, it is being told.
+        extra = "\n\n".join(
+            part for part in (self.memory.as_prompt(), self._scheduling_note()) if part
+        )
+        knowledge_text = f"{extra}\n\n{knowledge_text}".strip() if extra else knowledge_text
+
         return build_system_prompt(
             persona=self.config.persona,
             business=self.config.business,
@@ -204,6 +349,18 @@ class Conversation:
         timing.mark("redact")
 
         self.history.append(Turn("user", safe_text))
+
+        # Learn from the turn BEFORE the prompt is built, so anything just said reaches
+        # this reply rather than only the one after it.
+        learned = self.memory.observe(safe_text)
+        if learned:
+            yield {"type": "learned", "fields": learned, "memory": self.memory.as_dict()}
+
+        # Older turns are compressed rather than dropped. A caller who explained why they
+        # rang nine turns ago should not have to explain again because the window moved.
+        if len(self.history) > 14:
+            older = [(t.content, "") for t in self.history[:-12] if t.role == "user"]
+            self.memory.summary = summarise(older)
 
         # ── knowledge ─────────────────────────────────────────────────────
         knowledge_text, hits = "", []
@@ -292,6 +449,19 @@ class Conversation:
         if self.state and (self.state.ended or self.state.transferred):
             self.ended = True
 
+        # ── booking ──
+        # Decided HERE, not by the model. Confirming an appointment is the one
+        # irreversible act on the call, so a model that hallucinates a Thursday at nine
+        # cannot bring one into existence.
+        if self.memory.proposed_slot and _confirms(safe_text):
+            self.memory.slot_confirmed = True
+
+        booked = self.book_if_ready()
+        if booked:
+            yield {"type": "booked", **booked}
+        elif self.memory.ready_to_book and not self.memory.booked_reference:
+            yield {"type": "booking_failed", "reason": "that slot was just taken"}
+
         self.history.append(Turn("assistant", reply))
         record = TurnRecord(
             caller=safe_text, agent=reply, spoken=speakable(reply), timing=timing,
@@ -300,11 +470,93 @@ class Conversation:
             redacted=removed, refused=refused, grounding=grounding,
         )
         self.turns.append(record)
-        yield {"type": "done", **record.as_dict(), "ended": self.ended}
+        yield {
+            "type": "done", **record.as_dict(), "ended": self.ended,
+            "memory": self.memory.as_dict(), "booked": booked,
+        }
+
+    def book_if_ready(self) -> dict[str, Any] | None:
+        """Book, if and only if everything a booking needs is actually in hand.
+
+        The single gate. Called after a spoken turn AND after the details form is submitted,
+        because those are the two ways the last missing piece arrives and the caller should not
+        have to repeat themselves just because they finished on the keyboard rather than out
+        loud.
+        """
+        if self.booking is None or self.memory.booked_reference or not self.memory.ready_to_book:
+            return None
+        return self._commit_booking()
+
+    def _commit_booking(self) -> dict[str, Any] | None:
+        """Reserve the slot under discussion. Returns None if it went in the meantime."""
+        if self.booking is None:
+            return None
+        slot = match_slot(self.memory.when, self.open_slots())
+        if slot is None:
+            return None
+
+        record = self.booking.book(
+            slot.iso,
+            call_id=self.call_id,
+            patient_name=self.memory.get("name"),
+            phone=self.memory.get("phone"),
+            email=self.memory.get("email"),
+            reason=self.memory.get("reason") or "appointment",
+        )
+        if record is None:
+            return None
+
+        self.memory.booked_reference = record["reference"]
+        return {
+            "reference": record["reference"],
+            "starts_at": record["starts_at"],
+            "spoken": slot.spoken(self.today),
+            "name": record["patient_name"],
+            "reason": record["reason"],
+        }
 
     @property
     def transcript(self) -> list[dict[str, str]]:
         return [t.as_dict() for t in self.history]
+
+
+class BookingBackend(Protocol):
+    """What the conversation needs in order to reserve a slot.
+
+    Two methods, so the calendar and the conversation can each be tested without a database and
+    without each other.
+    """
+
+    def taken_slots(self) -> set[str]: ...
+    def book(self, starts_at: str, **fields: Any) -> dict[str, Any] | None: ...
+
+
+_CONFIRMS = re.compile(
+    r"\b(?:yes|yeah|yep|yup|sure|please|ok|okay|correct|go ahead|book it|sounds good|"
+    r"perfect|great|do it|confirm)\b",
+    re.IGNORECASE,
+)
+_DECLINES = re.compile(
+    r"\b(?:no|nope|not|cancel|wait|hold on|actually|instead|rather|change)\b", re.IGNORECASE
+)
+
+
+
+def _part_of(hour: int) -> str:
+    """The part of day an hour falls in, by the SAME boundary the calendar offers on.
+
+    Duplicating this constant is how a caller ends up asked to confirm "Thursday evening" and
+    then offered five in the afternoon.
+    """
+    return "morning" if hour < 12 else "afternoon" if hour < EVENING_FROM else "evening"
+
+def _confirms(text: str) -> bool:
+    """Did the caller agree?
+
+    A decline anywhere in the sentence wins. "Yes, but not Thursday" contains a yes and is not
+    one, and booking on it puts somebody in a slot they explicitly refused.
+    """
+    return bool(_CONFIRMS.search(text)) and not _DECLINES.search(text)
 
 
 def _citation(hit: Hit) -> dict[str, Any]:

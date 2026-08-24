@@ -9,7 +9,7 @@
 export type IconName =
   | 'grid' | 'phone' | 'list' | 'user' | 'book' | 'flow' | 'hash' | 'gauge' | 'shield'
   | 'search' | 'plus' | 'trash' | 'mic' | 'mic-off' | 'send' | 'check' | 'x' | 'alert'
-  | 'sparkle' | 'clock' | 'volume' | 'chevron'
+  | 'sparkle' | 'clock' | 'volume' | 'chevron' | 'chat' | 'calendar'
 
 const PATHS: Record<IconName, string> = {
   grid: 'M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z',
@@ -34,6 +34,8 @@ const PATHS: Record<IconName, string> = {
   clock: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2',
   volume: 'M11 5L6 9H2v6h4l5 4V5zM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14',
   chevron: 'M9 18l6-6-6-6',
+  chat: 'M21 11.5a8.4 8.4 0 0 1-9 8.4 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.2A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z',
+  calendar: 'M8 2v4M16 2v4M3.5 9.5h17M5 4.5h14a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2z',
 }
 
 interface Props {
