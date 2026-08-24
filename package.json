@@ -6,7 +6,8 @@
   "description": "Repo-level tooling. The app itself lives in apps/studio.",
   "scripts": {
     "smoke": "node scripts/smoke.mjs",
-    "screenshots": "node scripts/screenshots.mjs"
+    "screenshots": "node scripts/screenshots.mjs",
+    "scenarios": "node scripts/scenarios.mjs"
   },
   "devDependencies": {
     "playwright": "^1.49.0"

@@ -10,9 +10,10 @@ import { Icon } from '../components/Icon'
  * happened on the last few calls. A dashboard of things that are merely countable is how you get
  * a screen nobody opens twice.
  */
-export function Dashboard({ navigate, ready }: ViewProps) {
+export function Dashboard({ navigate, ready, offline }: ViewProps) {
   const [data, setData] = useState<Overview | null>(null)
   const [recent, setRecent] = useState<CallRow[]>([])
+  const [failed, setFailed] = useState(false)
 
   useEffect(() => {
     const load = async () => {
@@ -20,8 +21,11 @@ export function Dashboard({ navigate, ready }: ViewProps) {
         const [overview, { calls }] = await Promise.all([api.overview(), api.calls({ limit: 8 })])
         setData(overview)
         setRecent(calls)
+        setFailed(false)
       } catch {
-        /* the sidebar reports the gateway being unreachable */
+        // Recorded, not swallowed. The banner above says the gateway is down; without this the
+        // page below it went on showing loading skeletons indefinitely.
+        setFailed(true)
       }
     }
     void load()
@@ -30,10 +34,23 @@ export function Dashboard({ navigate, ready }: ViewProps) {
   }, [])
 
   if (!data) {
+    // Never loaded, and the last attempt failed. Skeletons here would promise something that is
+    // not coming.
+    if (failed || offline) {
+      return (
+        <div className="page">
+          <div className="empty">
+            <h3>Nothing to show yet</h3>
+            The gateway is not answering, so there are no figures to report. This page reconnects
+            by itself once it is back.
+          </div>
+        </div>
+      )
+    }
     return (
       <div className="page">
         <div className="grid g4">
-          {Array.from({ length: 4 }, (_, i) => <div key={i} className="skeleton" style={{ height: 88 }} />)}
+          {Array.from({ length: 4 }, (_, i) => <div key={i} className="skeleton" style={{ height: 108 }} />)}
         </div>
       </div>
     )

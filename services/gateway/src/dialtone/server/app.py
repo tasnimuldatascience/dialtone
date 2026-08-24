@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import re
 import time
 from contextlib import asynccontextmanager, suppress
@@ -56,7 +57,14 @@ async def lifespan(app: FastAPI):
     connections for twenty seconds looks broken; one that answers "not ready yet" is diagnosable.
     """
     global platform
-    platform = Platform("dialtone.db", use_local_model=True)
+    # Configurable rather than hardcoded. Two reasons, and the second is the one that made this
+    # worth changing: an operator running two agents from one checkout needs two databases, and
+    # a test needs a scratch one with no model behind it -- eighty seconds of weight loading per
+    # test run is the difference between a suite that gets run and one that does not.
+    platform = Platform(
+        os.environ.get("DIALTONE_DB", "dialtone.db"),
+        use_local_model=os.environ.get("DIALTONE_NO_MODEL") != "1",
+    )
     task = asyncio.create_task(platform.warm())
     yield
     task.cancel()
@@ -111,15 +119,31 @@ def overview() -> dict[str, Any]:
 
 
 # ── agents ───────────────────────────────────────────────────────────────────
+# ── input limits ─────────────────────────────────────────────────────────────
+# EVERY STRING THAT REACHES THE DATABASE IS BOUNDED. Without this, `POST /api/agents` with a
+# twenty-thousand-character name is a 200: it is stored, it is rendered into every dropdown, and
+# it goes into the system prompt on every turn of every call. Nothing here is a security control
+# -- this is a local single-tenant tool -- it is the difference between a field with a shape and
+# a field that is whatever arrived.
+#
+# The numbers are generous on purpose. They exist to stop the absurd, not to argue with a
+# legitimately long business name.
+SHORT = 120        # a name, a label, a voice
+LINE = 400         # a greeting, a persona
+TITLE = 200        # a document title
+QUERY = 2_000      # a search, a redaction check
+DOCUMENT = 500_000 # a knowledge document -- about 80,000 words
+
+
 class AgentIn(BaseModel):
-    name: str = "New agent"
-    business: str = "Acme"
-    persona: str = "a warm, efficient receptionist"
-    greeting: str = "Hello, how can I help?"
-    voice: str = "female-warm"
+    name: str = Field("New agent", max_length=SHORT)
+    business: str = Field("Acme", max_length=SHORT)
+    persona: str = Field("a warm, efficient receptionist", max_length=LINE)
+    greeting: str = Field("Hello, how can I help?", max_length=LINE)
+    voice: str = Field("female-warm", max_length=SHORT)
     temperature: float = Field(0.4, ge=0.0, le=1.2)
     use_knowledge: bool = True
-    status: str = "draft"
+    status: str = Field("draft", max_length=SHORT)
 
 
 @app.get("/api/agents")
@@ -190,14 +214,22 @@ def put_agent_flow(agent_id: str, body: dict[str, Any]) -> dict[str, Any]:
 
 # ── knowledge ────────────────────────────────────────────────────────────────
 class DocumentIn(BaseModel):
-    title: str
-    body: str
-    source: str = "upload"
+    title: str = Field(max_length=TITLE)
+    # Generous: a company handbook is a legitimate upload. The point of the cap is that
+    # "how big can a document be?" has an answer.
+    body: str = Field(max_length=DOCUMENT)
+    source: str = Field("upload", max_length=SHORT)
 
 
 @app.get("/api/agents/{agent_id}/documents")
 def list_documents(agent_id: str) -> dict[str, Any]:
     p = P()
+    # A 404, not an empty list. POST to this same path already 404s, and the inconsistency was
+    # worse than either answer on its own: asking for the documents of an agent that has been
+    # deleted in another tab showed "no documents yet" -- which reads as "this agent has no
+    # knowledge" rather than "this agent is gone", and the operator uploads a file into nothing.
+    if p.store.get_agent(agent_id) is None:
+        raise HTTPException(404, f"no agent {agent_id}")
     return {
         "documents": p.store.list_documents(agent_id),
         "index": p.knowledge_for(agent_id).stats,
@@ -226,7 +258,7 @@ def delete_document(agent_id: str, doc_id: str) -> dict[str, Any]:
 
 
 class SearchIn(BaseModel):
-    query: str
+    query: str = Field(max_length=QUERY)
     k: int = Field(3, ge=1, le=10)
 
 
@@ -253,8 +285,8 @@ async def search_knowledge(agent_id: str, body: SearchIn) -> dict[str, Any]:
 
 # ── numbers ──────────────────────────────────────────────────────────────────
 class NumberIn(BaseModel):
-    e164: str
-    label: str = ""
+    e164: str = Field(max_length=SHORT)
+    label: str = Field("", max_length=SHORT)
     agent_id: str | None = None
 
 
@@ -324,9 +356,9 @@ def get_call(call_id: str) -> dict[str, Any]:
 
 
 class StartCallIn(BaseModel):
-    agent_id: str
-    from_number: str = "+447700900123"
-    channel: str = "text"
+    agent_id: str = Field(max_length=SHORT)
+    from_number: str = Field("+447700900123", max_length=SHORT)
+    channel: str = Field("text", max_length=SHORT)
 
 
 @app.post("/api/calls")
@@ -355,10 +387,10 @@ def end_call(call_id: str) -> dict[str, Any]:
 class DetailsIn(BaseModel):
     """What the caller typed rather than said."""
 
-    name: str | None = None
-    phone: str | None = None
-    email: str | None = None
-    reason: str | None = None
+    name: str | None = Field(None, max_length=SHORT)
+    phone: str | None = Field(None, max_length=SHORT)
+    email: str | None = Field(None, max_length=SHORT)
+    reason: str | None = Field(None, max_length=SHORT)
 
 
 @app.get("/api/calls/{call_id}/memory")
@@ -731,7 +763,7 @@ def set_campaign_status(campaign_id: str, body: dict[str, Any]) -> dict[str, Any
 
 # ── compliance ───────────────────────────────────────────────────────────────
 class RedactIn(BaseModel):
-    text: str
+    text: str = Field(max_length=QUERY)
 
 
 @app.post("/api/redact")

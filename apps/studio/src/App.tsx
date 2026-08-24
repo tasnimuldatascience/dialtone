@@ -171,6 +171,7 @@ export function App() {
     toast: toasts.push,
     navigate: setRoute,
     ready: health?.status === 'ready',
+    offline: state === 'offline',
   }
 
   return (
@@ -240,6 +241,8 @@ export function App() {
         </header>
 
         <div className="content">
+          {state === 'offline' && <Offline />}
+          {state === 'starting' && <Starting />}
           {route.view === 'dashboard' && <Dashboard {...shared} />}
           {route.view === 'live' && <LiveCall {...shared} />}
           {route.view === 'appointments' && <Appointments {...shared} />}
@@ -259,6 +262,46 @@ export function App() {
   )
 }
 
+/* The gateway is not answering.
+ *
+ * A BANNER RATHER THAN A REPLACEMENT SCREEN. Taking over the content area would throw away a
+ * transcript the moment a connection wobbled, and the call is the thing a user would most mind
+ * losing. This sits above whatever was already there.
+ *
+ * It exists because the alternative was worse than an error: with the gateway down the dashboard
+ * showed four loading skeletons FOREVER, and the only clue was a small grey pill at the bottom of
+ * the sidebar. A loading state that never resolves is the least honest thing a UI can do — it
+ * tells the user to keep waiting for something that is never going to arrive.
+ */
+function Offline() {
+  return (
+    <div className="banner" data-t="bad">
+      <Icon name="alert" size={17} />
+      <div>
+        <b>The gateway is not answering.</b>
+        <p>
+          Nothing on this page is live. Start it with <code>dialtone serve</code>{' '}
+          in <code>services/gateway</code> — this page will reconnect on its own.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/* Loading weights takes about twenty seconds on first start. Saying so is the difference between
+ * "it is broken" and "it is nearly ready". */
+function Starting() {
+  return (
+    <div className="banner" data-t="warn">
+      <Icon name="clock" size={17} />
+      <div>
+        <b>The model is loading.</b>
+        <p>About twenty seconds on first start. Everything except making a call already works.</p>
+      </div>
+    </div>
+  )
+}
+
 export interface ViewProps {
   agent: Agent | null
   agents: Agent[]
@@ -268,4 +311,6 @@ export interface ViewProps {
   toast: (message: string, tone?: 'good' | 'bad') => void
   navigate: (route: Route) => void
   ready: boolean
+  /** The gateway is not answering. Views that load data should say so rather than spin. */
+  offline: boolean
 }
