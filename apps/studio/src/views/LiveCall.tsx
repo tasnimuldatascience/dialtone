@@ -4,6 +4,7 @@ import { api, openCall, type Grounding, type Hit, type Timing } from '../api'
 import { Icon } from '../components/Icon'
 import { AudioQueue, Listener, MicLevel, agentAudible, clearSpokenMemory, loadVoices, rememberSpoken, setAgentAudioProbe, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
 import { decideTurn } from '../turntaking'
+import { cleanTranscript, endsOnFiller } from '../transcript'
 
 /* Talking to the agent, by typing or by voice.
  *
@@ -368,6 +369,14 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
       const quietFor = now - lastVoiceAt.current
       setSilenceMs(quietFor)
 
+      // A caller who has just said "um" is mid-thought, whatever the silence says. This is the
+      // cheapest possible way to avoid interrupting someone, and it is the reason fillers are
+      // kept in the transcript the endpointer reads rather than stripped on arrival.
+      if (endsOnFiller(text)) {
+        setTurnReason('caller trailed off on a filler — still thinking')
+        return
+      }
+
       const decision = decideTurn({
         transcript: text,
         alreadySent: sentSoFar.current,
@@ -382,7 +391,10 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
       if (decision.send) {
         speechSeen.current = false
         sentSoFar.current = text
-        send(decision.text)
+        // Fillers and stutters go no further. The endpointer needed them; the agent does not,
+        // and a turn that was nothing but "um" is not a turn at all.
+        const clean = cleanTranscript(decision.text)
+        if (clean) send(clean)
       }
     }, 60)
     return () => window.clearInterval(timer)
@@ -466,7 +478,10 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
               <div className="bubble" data-who="caller">
                 <div className="av" data-who="caller">You</div>
                 <div>
-                  <div className="msg" style={{ opacity: 0.6 }}>{partial}<i className="caret" /></div>
+                  <div className="msg" style={{ opacity: 0.6 }}>
+                    {cleanTranscript(partial) || partial}
+                    <i className="caret" />
+                  </div>
                   {endpointMs !== null && (
                     <div className="msg-meta">
                       <span>waiting up to {endpointMs}ms</span>
