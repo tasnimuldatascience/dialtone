@@ -200,11 +200,17 @@ body {
 /* ── controls ───────────────────────────────────────────────────────────── */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-  border-radius: var(--r-sm); border: 1px solid transparent;
+  border-radius: var(--r-sm); border: 1px solid var(--line-2);
+  /* The base class sets a background of its own. Without one a bare `.btn` fell through to the
+     browser's native button styling and rendered as a WHITE block in a dark UI -- brighter than
+     the primary action next to it, which is exactly backwards. A base class should never
+     depend on a modifier being remembered. */
+  background: var(--bg-2); color: var(--text-2);
   font: inherit; font-size: 14px; font-weight: 580; cursor: pointer;
   padding: 9px 16px; white-space: nowrap;
   transition: background .12s, border-color .12s, color .12s, opacity .12s;
 }
+.btn:not(:disabled):hover { background: var(--bg-3); color: var(--text); }
 .btn:disabled { opacity: .42; cursor: not-allowed; }
 .btn-primary { background: linear-gradient(150deg, #48e8d9, var(--accent-2)); color: #04201e; box-shadow: var(--glow); }
 .btn-primary:not(:disabled):hover { background: #4ceadb; }

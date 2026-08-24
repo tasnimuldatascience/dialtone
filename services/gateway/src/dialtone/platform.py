@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -339,10 +340,29 @@ def _flow_from_dict(raw: dict[str, Any]) -> Flow:
 
 
 # ── call summarisation ───────────────────────────────────────────────────────
+# SINGLE WORDS ONLY, and every one of them has to be unambiguous on its own.
+#
+# "never" and "again" used to be in here -- they arrived as the phrase "never again" and the list
+# is split on whitespace, so both became independent cues. The result was that "sorry, say that
+# again?" scored as an angry call, which is one of the commonest things anyone says on a phone
+# line. A word goes in this list only if hearing it alone would make you think the caller was
+# upset.
 _NEGATIVE = frozenset("""
 angry furious ridiculous unacceptable terrible awful useless complaint complain rude disgusted
-appalling worst never again waste sue lawyer refund disgrace
+appalling worst disgrace sue lawyer refund
 """.split())
+
+#: Phrases, matched as phrases. This is where "never again" belongs, and anything else whose
+#: meaning lives in the combination rather than in either word.
+_NEGATIVE_PHRASES = (
+    "waste of time", "not good enough", "speak to a manager", "this is a joke",
+    "fed up", "sick of", "no use",
+)
+
+#: "Never ... again", with the middle allowed to vary -- "I am never coming here again" is the
+#: complaint an operator most wants to find in a list, and it rarely arrives as the bare phrase.
+#: Bounded to one clause so it cannot span a whole call and match by accident.
+_NEVER_AGAIN = re.compile(r"\bnever\b[^.!?]{0,40}\bagain\b")
 _POSITIVE = frozenset("""
 thanks thank great perfect lovely brilliant wonderful helpful excellent appreciate cheers
 fantastic pleased happy good
@@ -361,9 +381,15 @@ def _sentiment(convo: Conversation) -> str:
     because the agent is unfailingly polite by construction.
     """
     words: list[str] = []
+    said: list[str] = []
     for turn in convo.turns:
         words.extend(w.strip(".,!?").lower() for w in turn.caller.split())
+        said.append(turn.caller.lower())
+
+    spoken = " ".join(said)
     negative = sum(1 for w in words if w in _NEGATIVE)
+    negative += sum(spoken.count(phrase) for phrase in _NEGATIVE_PHRASES)
+    negative += len(_NEVER_AGAIN.findall(spoken))
     positive = sum(1 for w in words if w in _POSITIVE)
     if negative > positive:
         return "negative"
