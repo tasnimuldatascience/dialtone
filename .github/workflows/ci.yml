@@ -22,7 +22,21 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
 
-      - run: pip install -e ".[serve,dev]"
+      # The embedding model's weights, not the code. Downloading 130MB of bge-small on every
+      # run is slow and is the only part of this job that can fail for reasons unrelated to the
+      # commit.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-bge-small-en-v1.5
+
+      # Torch from the CPU index. The default wheel pulls the whole CUDA stack — around 800MB —
+      # and there is no GPU on a runner to use it.
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      # `brain` is included deliberately. Retrieval quality is a headline claim of this project,
+      # and the relevance gate is tuned to measured cosine distances, so a CI run that skips the
+      # encoder is not checking the thing most likely to regress.
+      - run: pip install -e ".[serve,brain,dev]"
       - run: python -m ruff check src tests
       - run: python -m pytest -q
 
