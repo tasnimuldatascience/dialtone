@@ -3,6 +3,7 @@ import type { ViewProps } from '../App'
 import { api, openCall, type Grounding, type Hit, type Timing } from '../api'
 import { Icon } from '../components/Icon'
 import { AudioQueue, Listener, MicLevel, clearSpokenMemory, loadVoices, rememberSpoken, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
+import { decideTurn } from '../turntaking'
 
 /* Talking to the agent, by typing or by voice.
  *
@@ -30,6 +31,8 @@ interface Line {
 
 type Phase = 'idle' | 'connecting' | 'live' | 'ended'
 
+
+
 export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProps) {
   const [phase, setPhase] = useState<Phase>('idle')
   const [lines, setLines] = useState<Line[]>([])
@@ -44,6 +47,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   const [summary, setSummary] = useState<Record<string, unknown> | null>(null)
   const [agentSpeaking, setAgentSpeaking] = useState(false)
   const [silenceMs, setSilenceMs] = useState(0)
+  const [turnReason, setTurnReason] = useState('')
   const [voiceEngine, setVoiceEngine] = useState<'kokoro-82m' | 'browser'>('browser')
   const [firstAudioMs, setFirstAudioMs] = useState<number | null>(null)
 
@@ -78,6 +82,14 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   //: The level meter was already measuring exactly the right thing.
   const lastVoiceAt = useRef(0)
   const speechSeen = useRef(false)
+  //: When the transcript last changed. The microphone level is real time; the TRANSCRIPT is not
+  //: -- Web Speech delivers words 300-500ms after they were spoken. Ending a turn on audio
+  //: silence alone therefore sends a sentence the recogniser has not finished writing down.
+  const lastPartialChangeAt = useRef(0)
+  //: What has already been dispatched. Web Speech's interim result always contains the whole
+  //: phrase from the beginning, so without this every fire re-sends everything said so far --
+  //: which is how one spoken sentence became four turns and four replies.
+  const sentSoFar = useRef('')
 
   useEffect(() => { void loadVoices() }, [])
 
@@ -164,6 +176,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     setLines([])
     setSummary(null)
     clearSpokenMemory()
+    sentSoFar.current = ''
     try {
       const { call_id, greeting } = await api.startCall(agentId, voiceOn ? 'voice' : 'text')
       setLines([{ who: 'agent', text: greeting }])
@@ -276,6 +289,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
         // next; this makes the silence detector robust to that without needing calibration.
         if (text !== lastPartial.current) {
           lastVoiceAt.current = performance.now()
+          lastPartialChangeAt.current = performance.now()
           speechSeen.current = true
         }
         lastPartial.current = text
@@ -300,27 +314,47 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
 
   /* THE SILENCE LOOP.
    *
-   * Runs every 60ms while the microphone is on, and is the only thing that ends a turn. Three
-   * conditions, all required:
+   * Runs every 60ms while the microphone is on, and is the only thing that ends a turn. It needs
+   * FOUR conditions, and each one is there because leaving it out produced a specific failure:
    *
-   *   there is something to send        an empty transcript is not a turn
-   *   the caller has actually spoken    otherwise room noise alone would fire it
-   *   the microphone has been quiet     for as long as this sentence has earned
-   *
-   * Nothing here watches the transcript for changes, which is what the previous version did and
-   * why it interrupted people: a recogniser that pauses to think looks identical to a caller who
-   * has finished.
+   *   something new to send        the interim transcript repeats everything said since the last
+   *                                final result, so without tracking what has already gone, one
+   *                                spoken sentence becomes a turn per word
+   *   the caller has spoken        otherwise room noise alone ends turns
+   *   the microphone is quiet      for as long as this sentence has earned -- the real signal
+   *   the transcript has settled   because the microphone is real time and the transcript is
+   *                                not. Web Speech delivers words 300-500ms after they were
+   *                                said, so audio silence on its own means "they stopped
+   *                                talking AND the recogniser may still be writing". Sending
+   *                                there truncates the sentence mid-way, which is exactly what
+   *                                turned "hi, how are you doing?" into four separate turns.
    */
   useEffect(() => {
     if (!micOn || phase !== 'live') return
     const timer = window.setInterval(() => {
       const text = lastPartial.current.trim()
-      if (!text || !speechSeen.current || agentSpeaking) return
-      const quietFor = performance.now() - lastVoiceAt.current
+      if (!text) return
+
+      // Only the part that has not already been dispatched.
+      const now = performance.now()
+      const quietFor = now - lastVoiceAt.current
       setSilenceMs(quietFor)
-      if (quietFor >= lastScore.current.ms) {
+
+      const decision = decideTurn({
+        transcript: text,
+        alreadySent: sentSoFar.current,
+        quietForMs: quietFor,
+        settledForMs: now - lastPartialChangeAt.current,
+        thresholdMs: lastScore.current.ms,
+        agentSpeaking,
+        heardSpeech: speechSeen.current,
+      })
+      setTurnReason(decision.reason)
+
+      if (decision.send) {
         speechSeen.current = false
-        send(text)
+        sentSoFar.current = text
+        send(decision.text)
       }
     }, 60)
     return () => window.clearInterval(timer)
@@ -408,9 +442,11 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
                   {endpointMs !== null && (
                     <div className="msg-meta">
                       <span>waiting up to {endpointMs}ms</span>
-                      <span style={{ color: silenceMs > endpointMs * 0.6 ? 'var(--cost)' : 'var(--text-3)' }}>
-                        quiet for {Math.round(silenceMs)}ms
-                      </span>
+                      {turnReason && (
+                        <span style={{ color: silenceMs > endpointMs * 0.6 ? 'var(--cost)' : 'var(--text-3)' }}>
+                          {turnReason}
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>

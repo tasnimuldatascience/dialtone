@@ -437,3 +437,49 @@ class TestSimulatedCalls:
         second = await replay(CANNED_CALLS["booking"])
         assert first["summary"] == second["summary"]
         assert first["events"] == second["events"]
+
+
+class TestRetrievalRelevance:
+    """The gate between "the agent knows this" and "the agent is guessing".
+
+    Both directions are tested because both are real failures and they pull against each other.
+    A live call retrieved the emergency-treatment page for "hi, how are you doing?" -- harmless
+    that time, and the same leak on a question about prices would have the agent answering from
+    an unrelated document with complete confidence.
+    """
+
+    def base(self):
+        from dialtone.brain.knowledge import KnowledgeBase
+        from dialtone.platform import SEED_DOCUMENTS
+
+        kb = KnowledgeBase()
+        for index, (title, body) in enumerate(SEED_DOCUMENTS.items()):
+            kb.add_document(f"d{index}", title, body)
+        return kb
+
+    @pytest.mark.parametrize("phrase", [
+        "hi", "hello", "hi how are you doing", "Hi, how are you doing?",
+        "thanks, bye", "ok great", "sorry can you repeat that",
+    ])
+    def test_small_talk_retrieves_nothing(self, phrase: str):
+        """Greetings are not questions. Handing the agent a document for "hello" invites it to
+        answer one that was never asked."""
+        assert self.base().search(phrase) == []
+
+    @pytest.mark.parametrize("question,expected", [
+        ("how much is a check-up", "Prices"),
+        ("my tooth broke", "Emergencies"),
+        ("are you open on saturday", "Opening hours"),
+        ("do you have parking", "Parking and access"),
+        ("is there disabled access", "Parking and access"),
+        ("can I cancel my appointment", "Appointments and cancellations"),
+    ])
+    def test_a_real_question_finds_the_right_document(self, question: str, expected: str):
+        """The costlier error of the two. An agent that says "let me check" about something it
+        was explicitly told is the reason a caller asks for a person."""
+        hits = self.base().search(question)
+        assert hits, f"{question!r} retrieved nothing"
+        assert hits[0].chunk.document_title == expected
+
+    def test_a_question_about_something_else_entirely_retrieves_nothing(self):
+        assert self.base().search("do you sell dog food") == []

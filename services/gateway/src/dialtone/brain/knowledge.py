@@ -43,16 +43,26 @@ CHUNK_OVERLAP = 80
 #: Three passages fit inside a phone reply's context without the model averaging across them.
 TOP_K = 3
 
-#: RAW cosine similarity below which a passage is simply not about the question. Measured, not
-#: guessed: on this encoder, genuinely relevant passages score 0.65-0.71 and unrelated ones
-#: 0.33-0.39, so 0.50 sits in empty space between the two populations.
+#: RAW cosine similarity below which a passage is not about the question. Measured on the real
+#: document set rather than guessed, and re-measured after a live call retrieved the emergency
+#: page for "hi, how are you doing?":
 #:
-#: This gate is applied BEFORE any normalising, and that ordering is the whole point. Min-max
-#: normalisation maps the best candidate to 1.0 no matter how bad it is, so a relative threshold
-#: can never reject "nothing here is relevant" -- ask a dental agent about dog food and the
-#: opening-hours page comes back scoring 1.00. Absolute first, relative only for ranking what
+#:     small talk and greetings   0.44 - 0.52   ("hi", "hello", "thanks, bye", "ok great")
+#:     genuine questions          0.56 - 0.77   ("do you have parking", "how much is a filling")
+#:
+#: 0.54 sits in the gap. It is a narrow gap -- 0.52 to 0.56 -- and the placement inside it is
+#: deliberate rather than central: it is set just below the lowest real question, because the two
+#: errors are not equally bad. Retrieving a spare passage for "hello" costs almost nothing, since
+#: the prompt tells the agent to use the passages only if they answer the question. MISSING a
+#: real question makes the agent say "let me check" about something it was told, which is the
+#: failure a caller actually notices.
+#:
+#: The gate is applied BEFORE any normalising, and that ordering is the whole point. Min-max
+#: normalisation maps the best candidate to 1.0 however bad it is, so a relative threshold can
+#: never express "nothing here is relevant" -- ask a dental agent about dog food and the
+#: opening-hours page comes back at full confidence. Absolute first; relative only to rank what
 #: survives.
-MIN_RELEVANCE = 0.50
+MIN_RELEVANCE = 0.54
 
 #: A passage can also earn its place on exact wording alone -- a caller naming a specific form or
 #: product may paraphrase nothing. This is the share of the question's content words that must
