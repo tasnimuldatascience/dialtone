@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ViewProps } from '../App'
 import { api, openCall, type Grounding, type Hit, type Timing } from '../api'
 import { Icon } from '../components/Icon'
-import { AudioQueue, Listener, MicLevel, clearSpokenMemory, loadVoices, rememberSpoken, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
+import { AudioQueue, Listener, MicLevel, agentAudible, clearSpokenMemory, loadVoices, rememberSpoken, setAgentAudioProbe, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
 import { decideTurn } from '../turntaking'
 
 /* Talking to the agent, by typing or by voice.
@@ -107,11 +107,17 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
   }, [])
 
   useEffect(() => {
-    audio.current = new AudioQueue(() => {
-      audio.current?.markDone()
+    const queue = new AudioQueue(() => {
+      queue.markDone()
       setAgentSpeaking(false)
     })
-    return () => audio.current?.close()
+    audio.current = queue
+    // The listener asks the audio clock directly rather than trusting a flag we maintain.
+    setAgentAudioProbe(() => queue.isAudible())
+    return () => {
+      setAgentAudioProbe(null)
+      queue.close()
+    }
   }, [])
 
   // Scroll the transcript container, never the document: scrollIntoView walks up to the page and
@@ -169,6 +175,62 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
       /* keep the previous threshold; the fixed fallback is what this project improves on */
     }
   }, [])
+
+  const stopMic = useCallback(() => {
+    listener.current?.stop()
+    listener.current = null
+    meter.current?.stop()
+    meter.current = null
+    setMicOn(false)
+    setLevel(0)
+  }, [])
+
+  const startMic = useCallback(async () => {
+    if (listener.current) return
+    listener.current = new Listener({
+      onPartial: (text) => {
+        // Anything arriving while the agent is audible is the agent. The listener already drops
+        // these, but the check is repeated here because this callback is also what advances the
+        // turn state -- and a single leaked frame resets the settle timer, which is enough to
+        // stop a turn ever ending.
+        if (agentAudible()) return
+
+        // New words are proof of speech, independent of the level meter. Microphone gain varies
+        // enormously between machines, and a level threshold tuned on one laptop is wrong on the
+        // next; this makes the silence detector robust to that without needing calibration.
+        if (text !== lastPartial.current) {
+          lastVoiceAt.current = performance.now()
+          lastPartialChangeAt.current = performance.now()
+          speechSeen.current = true
+        }
+        lastPartial.current = text
+        setPartial(text)
+        void rescore(text)
+      },
+    })
+    listener.current.start()
+
+    meter.current = new MicLevel()
+    void meter.current.start((value) => {
+      setLevel(value)
+      // Voice activity. The floor is well above room noise and well below speech; a laptop
+      // microphone in a quiet room idles around 0.02.
+      //
+      // Ignored entirely while the agent is audible: on open speakers the microphone hears the
+      // agent loudly, and counting that as caller speech kept resetting the silence timer, so
+      // the turn could not end while the agent was talking OR for a while afterwards.
+      if (value > 0.08 && !agentAudible()) {
+        lastVoiceAt.current = performance.now()
+        speechSeen.current = true
+      }
+    })
+    setMicOn(true)
+  }, [rescore])
+
+  const toggleMic = useCallback(async () => {
+    if (micOn) stopMic()
+    else await startMic()
+  }, [micOn, startMic, stopMic])
 
   const start = useCallback(async () => {
     if (!agentId) return
@@ -255,62 +317,28 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
       }, () => setPhase('ended'))
 
       setPhase('live')
+
+      // A voice call opens with the microphone live. Requiring a second click before the agent
+      // can hear anything is not how a telephone behaves, and it is the first thing anyone
+      // trying this trips over.
+      if (voiceOn && speechSupported()) {
+        void startMic()
+      }
     } catch (error) {
       setLines([{ who: 'agent', text: `Could not start the call: ${String(error)}` }])
       setPhase('idle')
     }
-  }, [agentId, agent, voiceOn])
+  }, [agentId, agent, voiceOn, startMic])
 
   const hangup = useCallback(() => {
     socket.current?.hangup()
-    listener.current?.stop()
-    meter.current?.stop()
-    setMicOn(false)
+    stopMic()
     stopSpeaking()
     audio.current?.stop()
     setAgentSpeaking(false)
     setPhase('ended')
-  }, [])
+  }, [stopMic])
 
-  const toggleMic = useCallback(async () => {
-    if (micOn) {
-      listener.current?.stop()
-      listener.current = null
-      meter.current?.stop()
-      meter.current = null
-      setMicOn(false)
-      setLevel(0)
-      return
-    }
-    listener.current = new Listener({
-      onPartial: (text) => {
-        // New words are proof of speech, independent of the level meter. Microphone gain varies
-        // enormously between machines, and a level threshold tuned on one laptop is wrong on the
-        // next; this makes the silence detector robust to that without needing calibration.
-        if (text !== lastPartial.current) {
-          lastVoiceAt.current = performance.now()
-          lastPartialChangeAt.current = performance.now()
-          speechSeen.current = true
-        }
-        lastPartial.current = text
-        setPartial(text)
-        void rescore(text)
-      },
-    })
-    listener.current.start()
-
-    meter.current = new MicLevel()
-    void meter.current.start((value) => {
-      setLevel(value)
-      // Voice activity. The floor is well above room noise and well below speech; a laptop
-      // microphone in a quiet room idles around 0.02.
-      if (value > 0.08) {
-        lastVoiceAt.current = performance.now()
-        speechSeen.current = true
-      }
-    })
-    setMicOn(true)
-  }, [micOn, rescore])
 
   /* THE SILENCE LOOP.
    *

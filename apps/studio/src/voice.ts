@@ -86,6 +86,28 @@ export interface ListenerHandlers {
 let agentSpeaking = false
 
 /**
+ * Asks the audio system whether the agent is audible RIGHT NOW.
+ *
+ * A FLAG CANNOT DO THIS JOB, and two attempts at one proved it. Audio arrives in chunks with
+ * gaps between them while the next is synthesised, so a flag cleared when the queue empties goes
+ * false in the middle of a sentence -- opening the microphone for a few hundred milliseconds,
+ * exactly in time for the next chunk to be recorded.
+ *
+ * The audio clock already knows the answer and cannot go stale, so it is asked instead of
+ * mirrored. `AudioQueue` installs the probe when a call starts.
+ */
+let agentAudioProbe: (() => boolean) | null = null
+
+export function setAgentAudioProbe(probe: (() => boolean) | null): void {
+  agentAudioProbe = probe
+}
+
+/** True if the agent is producing sound by any route: browser speech or streamed audio. */
+export function agentAudible(): boolean {
+  return agentSpeaking || (agentAudioProbe?.() ?? false)
+}
+
+/**
  * What the agent has said recently, normalised for comparison.
  *
  * TIME-BASED MUTING IS NOT ENOUGH, and this is the part that took two attempts to get right.
@@ -171,10 +193,18 @@ export class Listener {
     recognition.lang = this.lang
 
     recognition.onresult = (event) => {
-      // Drop anything heard while the agent is talking: it is the agent, coming back through
-      // the microphone. Discarding rather than pausing recognition keeps the engine warm, which
+      // Drop anything heard while the agent is audible: it is the agent, coming back through the
+      // microphone. Discarding rather than pausing recognition keeps the engine warm, which
       // matters because restarting it costs a beat of real speech.
-      if (agentSpeaking) return
+      //
+      // The settled buffer is cleared as well. Without that, echo captured before this check
+      // ran stays in the buffer and is prepended to whatever the caller says next -- so the
+      // transcript never stops changing, the turn never ends, and the agent appears not to know
+      // when the caller has finished.
+      if (agentAudible()) {
+        this.settled = ''
+        return
+      }
 
       let interim = ''
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
@@ -469,6 +499,19 @@ export class AudioQueue {
     agentSpeaking = false
   }
 
+  /**
+   * Is queued audio still playing, or about to?
+   *
+   * Answered from the audio clock rather than from a counter, so it stays correct across the
+   * gaps between chunks. The tail covers the speakers settling and the recogniser's own delay in
+   * reporting what it heard just before the end.
+   */
+  isAudible(tailSeconds = 0.55): boolean {
+    const context = this.context
+    if (!context) return false
+    return context.currentTime < this.playAt + tailSeconds
+  }
+
   get playing(): boolean {
     return this.pending > 0
   }
@@ -480,15 +523,9 @@ export class AudioQueue {
   }
 
   markDone(): void {
-    // Hold the mute until everything SCHEDULED has actually finished, not just until the last
-    // buffer that happened to end. Chunks arrive with gaps, so the queue can momentarily empty
-    // while more are still coming, and unmuting there let the next chunk straight back into the
-    // microphone. `playAt` is the audio clock's own answer to "when does the agent stop".
-    const context = this.context
-    const remaining = context ? Math.max(0, this.playAt - context.currentTime) * 1000 : 0
-    window.setTimeout(() => {
-      if (!this.playing) agentSpeaking = false
-    }, remaining + 400)
+    // Nothing to schedule: `isAudible` reads the clock directly, so there is no flag to clear at
+    // the right moment and therefore no wrong moment to clear it at.
+    agentSpeaking = false
   }
 
   close(): void {
