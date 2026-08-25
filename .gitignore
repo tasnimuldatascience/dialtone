@@ -34,3 +34,9 @@ apps/*/.vite/
 # TTS model weights (330MB) — downloaded by scripts/get-voice.sh
 services/gateway/models/*.onnx
 services/gateway/models/*.bin
+
+# The generated tour. The three scripts that build it ARE checked in; the 47MB of WebM, WAV and
+# MP4 they produce is not. A repository is not a CDN, and the video is reproducible in one line:
+#   python scripts/narrate.py && node scripts/demo-video.mjs && python scripts/soundtrack.py
+docs/video/
+
