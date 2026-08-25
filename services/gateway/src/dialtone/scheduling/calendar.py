@@ -199,6 +199,41 @@ class When:
         )
 
 
+#: An utterance asking about the PRACTICE rather than asking for a slot. "Are you open on
+#: Saturday?" names a day and requests nothing; reading it as a date put Saturday into the
+#: booking, and the call showed up in the history as "wanted an appointment" when the caller had
+#: asked what time the doors open.
+#:
+#: The plural was handled first -- "are you open on thursdays?" -- by requiring a word boundary,
+#: which was the wrong diagnosis dressed as a fix: the singular is just as common and just as
+#: much a question. What separates the two cases is not the shape of the day word, it is whether
+#: the sentence is about the business or about the caller.
+_ABOUT_HOURS = re.compile(
+    r"\b(?:are|is)\s+(?:you|it|they|the\s+\w+)\s+(?:open|closed|shut)\b"
+    r"|\bdo\s+you\s+(?:open|close)\b"
+    r"|\bwhen\s+(?:do|are)\s+you\s+(?:open|close|closed|shut)\b"
+    r"|\bwhat\s+(?:time|hours)\s+(?:do|are)\s+you\b"
+    r"|\bopening\s+(?:hours|times)\b"
+    r"|\byour\s+(?:opening\s+)?hours\b"
+    r"|\bhow\s+(?:late|early)\s+(?:are|do)\s+you\b",
+    re.IGNORECASE,
+)
+
+#: ...unless they also asked for something. "Are you open Saturday? I need an appointment" is
+#: both, and the request is the part worth keeping -- so a sentence carrying either signal is
+#: parsed for a date as usual.
+_WANTS_A_SLOT = re.compile(
+    r"\b(?:book|booking|appointment|appointments|slot|come\s+in|pop\s+in|fit\s+me|"
+    r"squeeze\s+me|see\s+(?:someone|somebody|the\s+\w+)|available|free)\b",
+    re.IGNORECASE,
+)
+
+
+def asks_about_hours(text: str) -> bool:
+    """Is this a question about when the practice is open, rather than a request for a time?"""
+    return bool(_ABOUT_HOURS.search(text)) and not _WANTS_A_SLOT.search(text)
+
+
 def parse_when(text: str, today: date) -> When:
     """Turn "tomorrow morning" or "ten thirty on Thursday" into a day and a time.
 
@@ -208,6 +243,12 @@ def parse_when(text: str, today: date) -> When:
     """
     lowered = text.lower()
     when = When()
+
+    # NOTHING IS A REQUEST FOR A DATE HERE. Returning early rather than skipping the day block,
+    # because "are you open at eight?" would otherwise leave an hour in memory with no day, and a
+    # half-parsed time is harder to notice than none at all.
+    if asks_about_hours(lowered):
+        return when
 
     # ── the day ──────────────────────────────────────────────────────────
     if "day after tomorrow" in lowered:

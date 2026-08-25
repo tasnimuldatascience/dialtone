@@ -28,6 +28,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 
 # `time` is aliased: the stdlib `time` module is already imported above for perf_counter,
@@ -172,6 +173,20 @@ class TurnRecord:
         }
 
 
+#: An explicit request to be put through to a person. Matched on the caller's LAST turn only.
+_WANTS_A_PERSON = re.compile(
+    r"\b(?:speak|talk|spoke)\s+(?:to|with)\s+a\s+(?:human|person|real\s+person|receptionist|member\s+of\s+staff)"
+    r"|\b(?:speak|talk)\s+(?:to|with)\s+(?:someone|somebody|reception|(?:a|my|the)\s+(?:doctor|dentist)|the\s+manager)"
+    r"|\bput\s+me\s+through\b"
+    r"|\btransfer\s+me\b"
+    r"|\b(?:get|give)\s+me\s+(?:a\s+)?(?:human|person|someone)\b"
+    r"|\bis\s+there\s+(?:a|any)\s+(?:human|real\s+person|one\s+there)\b"
+    r"|\b(?:i\s+(?:want|need)|can\s+i\s+(?:have|get))\s+(?:to\s+speak\s+to\s+)?a\s+(?:human|real\s+person)\b"
+    r"|\b(?:human|real\s+person)\s+please\b",
+    re.IGNORECASE,
+)
+
+
 class Conversation:
     """A live call. Holds the history, the flow position, and what has been collected."""
 
@@ -237,6 +252,18 @@ class Conversation:
         look them up.
         """
         if self.booking is None:
+            return ""
+
+        # BEING PUT THROUGH TO A PERSON. Nothing about availability or intake belongs in this
+        # prompt any more, and leaving it in does real damage: the transfer fired correctly, the
+        # call was filed as `passed on`, and the caller was told "we're currently unable to
+        # assist with that request -- could you provide your full name and phone number". The
+        # graph had moved; the prompt had not, so the model was still reading an instruction to
+        # collect details and answered from that instead of from the handoff objective.
+        #
+        # Returning empty leaves the node's own objective standing alone, which is exactly what
+        # the JUST BOOKED case below does for the same reason.
+        if self.state is not None and self.state.transferred:
             return ""
 
         # JUST BOOKED. This is the whole of the agent's job for this turn, so it goes first and
@@ -469,6 +496,17 @@ class Conversation:
         # Learn from the turn BEFORE the prompt is built, so anything just said reaches
         # this reply rather than only the one after it.
         learned = self.memory.observe(safe_text)
+
+        # ── "put me through to a person" ───────────────────────────────────
+        # A REQUEST FOR A HUMAN OUTRANKS THE STEP. It does not satisfy `reason` and never will,
+        # so a flow that only moves on when the current step is finished answers it by asking
+        # what they need booked -- which is what a real seeded call did, and the call was then
+        # filed as `answered`. Checked here, before the prompt exists, so the reply comes from
+        # the handoff node rather than from the step being abandoned.
+        escalated = self._escalate(safe_text)
+        if escalated:
+            yield {"type": "moved", "from": self.state.visited[-2] if self.state else "",
+                   "to": escalated}
 
         # ── the caller's answer to an offer, read BEFORE the reply is written ──
         # A slot offered on the previous turn plus a "yes" on this one is a booking, and it has
@@ -758,6 +796,53 @@ class Conversation:
             # A reply has just been generated from it, so it has said its piece.
             return True
         return False                         # TRANSFER and END are terminal
+
+    def _wants_a_person(self, said: str) -> bool:
+        """Has the caller just asked to be put through to a human?
+
+        THE MOST-ASKED-FOR THING ON ANY PHONE LINE, and until now this graph could not do it. A
+        `handoff` node existed, three nodes had an edge to it, and `_advance` always took
+        `legal[0]` -- the ordinary continuation -- so the edge was decoration. A caller who typed
+        "I want to speak to a human please" was answered with a question about what they needed to
+        come in for, and the call was filed as `answered`.
+
+        ONLY THE LAST THING THEY SAID counts. A caller who mentioned a person eight turns ago and
+        then happily booked has not asked for one now, and an escalation triggered by the whole
+        transcript escalates every call that ever brushed the subject.
+
+        DELIBERATELY NOT DISTRESS. The graph says "or sounds distressed", and a word list for that
+        would fire on "it really hurts" -- which at a dental practice is not a request for a
+        supervisor, it is the reason they rang. Booking them in IS the right answer. An explicit
+        request is unambiguous; distress is not, and guessing wrong costs the caller the
+        appointment they called for.
+        """
+        return bool(_WANTS_A_PERSON.search(said))
+
+    def _escalate(self, said: str) -> str:
+        """Move to the transfer step if the caller asked for a person. Returns the node, or "".
+
+        BEFORE THE REPLY IS WRITTEN, and that is the whole difference between this working and
+        merely being recorded. The first version ran after generation, alongside the other
+        transitions: the call was correctly marked transferred, and the caller was told "could you
+        tell me what you need to come in for?" -- because the reply had already been composed from
+        the objective of the step they were leaving. Half-right is not right. Moving first means
+        the model writes from the handoff node's own objective, which is to say who they are being
+        put through to and why.
+
+        `forced=True` is what the graph provides for leaving a COLLECT node without its value.
+        The edge is still one the flow declared -- an undeclared transition is refused here
+        exactly as anywhere else -- so this changes who proposes, not what is permitted.
+        """
+        if not (self.runner and self.state) or self.state.transferred or self.state.ended:
+            return ""
+        if not self._wants_a_person(said):
+            return ""
+        for edge in self.runner.legal_transitions(self.state):
+            if self.runner.flow.nodes[edge.to].kind is NodeKind.TRANSFER:
+                with suppress(GuardrailError):
+                    self.runner.transition(self.state, edge.to, forced=True)
+                    return self.state.node_id
+        return ""
 
     def _advance(self, ran: tuple[str, ...] = ()) -> str:
         """Move to the next step when the current one is finished. Returns the new node, or "".

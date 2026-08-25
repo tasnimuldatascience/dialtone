@@ -65,7 +65,7 @@ Not ahead, but genuinely implemented rather than stubbed.
 | **Simulation testing** | ✅ | Scripted calls, replayable, deterministic. All four have deeper versions — Bland's especially (flakiness detection, auto-fix loops). |
 | **Idempotency on money paths** | ✅ | Plus a `UNIQUE` constraint on the appointment slot, so two callers cannot take the same one. |
 | **Typed intake with validation** | ✅ | Operator-declared fields, nine kinds, validated before storage. Comparable to the structured-extraction features, though those extract from the transcript rather than from a form. |
-| **A published concurrency limit** | ✅ 3 | All four publish one (Retell 20, Vapi 10, Bland 10–100, ElevenLabs 4–40). dialtone's is far lower and it is *measured* — one 1.5B model on a CPU. What it does have that they do not is the table the number came from. |
+| **A published concurrency limit** | ✅ 2 | All four publish one (Retell 20, Vapi 10, Bland 10–100, ElevenLabs 4–40). dialtone's is far lower and it is *measured* — one 1.5B model on a CPU. What it does have that they do not is the table the number came from, including the run that moved it from 3 to 2. |
 | **Refusing rather than degrading** | ✅ | 503 with a reason and a `Retry-After`, because a caller who is already connected and waiting five seconds is worse off than one who was told to ring back. |
 
 ---
@@ -113,6 +113,23 @@ resource is generation; everything else in a turn is cheap. Getting past a handf
 continuous batching in front of the model (vLLM or equivalent) and a model server scaled
 independently of the gateway. Not done here, and named rather than hidden — the limit is enforced
 so the failure is a refusal instead of eight people listening to silence.
+
+The limit was 3 until three real callers were run rather than interpolated: 5.2s on voice, 5.7s
+typed. Two holds at 3.3 / 3.6s. A number that sits between two measured rows is not itself a
+measurement.
+
+### The failure that needs two callers to exist
+
+Every vendor here is multi-tenant at a scale dialtone is not, which makes it easy to assume the
+overlap problems are theirs and not this project's. They are not. Running five callers at once —
+`scripts/multi-client.py`, both channels, mixed intents — surfaced one immediately: two callers
+were offered the same free slot, `starts_at UNIQUE` refused the second INSERT exactly as designed,
+and **the losing caller was never told**. They had agreed a time; the appointment did not exist.
+
+Worth stating because the interesting half is what was already right. The database guarantee held.
+The gap was conversational: no code path turned a lost race back into something to say. That is
+the shape of most concurrency bugs in an agent — not corrupted state, but a correct refusal that
+never reaches the person waiting on it.
 
 ### Model and voice breadth
 

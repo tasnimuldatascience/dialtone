@@ -288,7 +288,7 @@ You need Python 3.12+ and Node 20+. No API keys. No GPU. Nothing paid.
 cd services/gateway
 pip install -e ".[serve,dev]"
 
-pytest                    # 495 tests
+pytest                    # 502 tests
 dialtone bench ablate     # see the results table
 dialtone serve            # starts on http://127.0.0.1:8071
 
@@ -305,6 +305,7 @@ To watch the whole thing happen without a browser:
 
 ```bash
 python scripts/booking-e2e.py    # a real call, end to end, then checks the database
+python scripts/multi-client.py   # five of them at once, on both channels
 ```
 
 ### Try this first
@@ -400,15 +401,23 @@ at [insert location]"* — a gap in the knowledge base, rendered as the shape of
 
 ## How many callers at once
 
-Three, on a laptop. That number is measured, not chosen, and the measuring is the interesting
-part.
+Two, on a laptop. That number is measured, not chosen, and it was **three** until the measuring
+caught it — which is the interesting part.
 
 | callers at once | first token | whole turn | vs one caller |
 |---:|---:|---:|---:|
 | 1 | 1114ms | 3091ms | 1.0× |
 | 2 | 1054ms | 2699ms | 0.9× |
+| 3 | — | **~5500ms** | 1.8× |
 | 4 | 3427ms | 5929ms | 1.9× |
 | 8 | **5287ms** | 8100ms | 2.6× |
+
+**The three was a guess wearing the clothes of a measurement.** The sweep above ran 1, 2, 4 and 8;
+three was picked by splitting the difference and written up with a table beside it, which is how a
+number ends up looking rigorous and being an interpolation. Running three real callers put the
+median turn at 5.2 seconds on voice and 5.7 on text. That is not a phone call. Two holds at 3.3s
+typed and 3.6s spoken, so the limit is two, and the lesson is that the row you did not run is the
+row that is wrong.
 
 **Nothing failed at eight**, and that is exactly the problem. The system did not refuse anybody;
 it degraded everybody. Every caller waited more than five seconds for the first word — from a
@@ -420,7 +429,7 @@ that cannot be served is refused with a reason:
 
 ```console
 $ curl -s -X POST localhost:8071/api/calls -d '{"agent_id":"..."}' -w ' %{http_code}\n'
-{"detail":"3 calls already in progress, which is this machine's limit.
+{"detail":"2 calls already in progress, which is this machine's limit.
            Raise DIALTONE_MAX_CALLS if the hardware can take it."} 503
 ```
 
@@ -439,6 +448,46 @@ otherwise by simply not having a limit is how you end up with eight people liste
 For context: Retell ships 20 concurrent free, Vapi 10 at $10/line/month, Bland 10 to 100 by plan,
 ElevenLabs 4 to 40. All four publish the number. Until now this published nothing, which is
 indistinguishable from having no limit right up until the day it is hit.
+
+### What only breaks when calls overlap
+
+Latency is the obvious cost of concurrency and the least interesting one. The failures that
+matter are the ones that cannot happen to a single call, so `scripts/multi-client.py` runs five at
+once on both channels — a spoken booking, a typed booking, two questions and somebody who never
+speaks — and asserts on the overlap:
+
+| what it checks | why it can only fail here |
+|---|---|
+| each appointment carries the right caller's name | shared memory puts the wrong name on the wrong booking |
+| no two callers were given the same slot | both were shown it free; one INSERT wins |
+| no call was holding another caller's details | flow position and proposed slot are per-call or they are not |
+| a caller past the limit is refused with a reason | the door has to say no, not queue silently |
+| the silent caller is recorded, not lost | a call with no speech still happened |
+| latency, split by channel | a voice turn also pays for synthesis; averaging the two hides both |
+
+**It found a real one on the first run.** Two callers were offered tomorrow at eight thirty —
+correctly, it was free when each was offered it — and one of them booked it. `starts_at` is
+`UNIQUE`, so the INSERT failed and there was no double booking. The guarantee worked perfectly.
+
+Nobody told the other caller. They had said *"yes, that works"*, and the appointment simply never
+existed; the conversation gave no sign of it. **That is worse than the double booking it was
+preventing**, because a double booking is at least visible to somebody. The fix is not in the
+schema — the schema was right — it is that the loser is now told the time has gone, the agreement
+is cleared, and the nearest alternative is offered in the same breath. The *day* survives the
+clearing, so *"how about eleven then"* still has something to attach to; an earlier version reset
+the whole request and a recovery test caught it.
+
+```console
+$ python scripts/multi-client.py
+  Ama Boateng   (voice, booking)   booked NGE78AD2 — tomorrow at eight thirty in the morning
+  Jonas Weber   (text,  booking)   booked NG772A37 — tomorrow at one in the afternoon
+  Priya Raman   (text,  question)  refused — 503: 2 calls already in progress…
+  Tom Ellis     (voice, question)  refused — 503: 2 calls already in progress…
+  silent caller (voice, silent)    refused — 503: 2 calls already in progress…
+
+  text   p50 3263ms   max 3984ms
+  voice  p50 3641ms   max 5630ms
+```
 
 ---
 
@@ -627,6 +676,35 @@ It asked on every single call. Deleting it is what fixed it.
 
 ![Node detail](docs/img/flow-node.png)
 
+### A drawn edge is not a reachable one
+
+Five of those six paths end at `handoff`, and until this week **none of them could be taken**.
+
+The graph is advanced by code rather than by the model — a 1.5B model asked to append `[[node_id]]`
+to a phone reply does not do it, and a trace of a real booking showed every turn still sitting on
+`greet`. So `_advance` moves on when a step is demonstrably finished, and it took `legal[0]`: the
+ordinary continuation, which graph authors put first. The escape hatches were never first. They
+were never taken.
+
+What that looked like from the caller's side:
+
+```
+caller:  I want to speak to a human please
+agent:   I'm sorry to hear that. Can you please provide me with your full name…
+         result: answered
+```
+
+Two things were wrong and only one of them is the edge. A request for a person **does not satisfy
+the step it arrives at** — it will never collect a reason — so a transfer that waits for the step
+to finish waits forever. And the check has to run **before the reply is written**: the first
+version moved after generation, which marked the call transferred correctly and still answered
+from the objective of the step being abandoned. Half-right is not right.
+
+**Distress is deliberately not implemented**, though two edges name it. A word list for "sounds
+distressed" fires on *"it really hurts"* — which at a dental practice is not a request for a
+supervisor, it is the reason they rang, and booking them in is the correct answer. An explicit
+request is unambiguous; distress is not, and guessing wrong costs the caller their appointment.
+
 ### Slow tools need covering
 
 On a phone call, a slow database lookup is **silence**, and silence sounds like the line dropped.
@@ -655,6 +733,14 @@ Two separate guards, because they fail in different ways:
 
 A caller who says *"yes, great, thanks"* three times has agreed once, and there is a test for
 that too.
+
+**And then somebody has to be told.** The `UNIQUE` constraint is only half the answer: it stops
+the double booking and says nothing to the caller who lost. Running five calls at once found
+exactly that — a caller who had agreed a time, whose appointment did not exist, whose call carried
+on as though it did. A correct refusal that never reaches the person waiting on it is not a
+guarantee, it is a silence. The losing call now hears the time has gone and gets the next one
+offered in the same sentence, with the *day* they asked for kept so the conversation resumes
+instead of restarting.
 
 ---
 
@@ -727,6 +813,7 @@ apps/studio/src/
 
 scripts/
 ├── booking-e2e.py        a real call against the real model, then checks the database
+├── multi-client.py       five callers at once, both channels, checking the overlap
 └── smoke.mjs             every screen in a real browser, with a fake microphone
 ```
 
@@ -751,7 +838,7 @@ agents feel like a walkie-talkie.
 
 ## Tests
 
-495 in the gateway, 108 in the browser, and four scripts that drive the whole thing for real.
+502 in the gateway, 108 in the browser, and five scripts that drive the whole thing for real.
 Each is named after the problem it prevents, not the function it calls:
 
 ```
@@ -765,13 +852,14 @@ test_a_time_that_does_not_exist_is_refused_even_on_a_free_day
 ```
 
 ```bash
-cd services/gateway && pytest          # 495
+cd services/gateway && pytest          # 502
 cd apps/studio      && npm test        # 108
 npm run smoke                          # every screen, in Chromium, with a fake microphone
 npm run scenarios                      # gateway down, socket dropped, 1024px, keyboard only
 python scripts/booking-e2e.py          # a real call, then a look in the database
 python scripts/interrupt-e2e.py        # talk over the agent, check what it thinks it said
 python scripts/long-call.py            # thirty turns, and print all of them
+python scripts/multi-client.py         # five callers at once, and what crosses between them
 ```
 
 `long-call.py` earns its place. Every structural check in it passed the first time — no crash, no
@@ -796,6 +884,11 @@ Some exist because the code was wrong first:
 | The whole weight system never rendered | `Inter` was declared and never loaded, so ten weights fell back to two |
 | It never asked for the missing details | It was told not to ask for an email out loud, and never told to ask for anything else instead |
 | "One more thing" was parsed as one o'clock | It silently moved an appointment already agreed for nine thirty |
+| **"I want to speak to a human" was answered by asking what they needed booked** | The `handoff` node existed and three nodes had an edge to it. `_advance` always took the first edge, so the transfer was unreachable |
+| "Are you open on Saturday?" was filed as wanting a Saturday appointment | The plural was fixed with a word boundary. That was the wrong diagnosis — the question is about the practice, not about a date |
+| **A caller lost a race for a slot and was never told** | The `UNIQUE` constraint worked perfectly. They had agreed a time, the appointment did not exist, and nothing in the conversation said so |
+| "Asked about prices — cleaning" for someone booking a cleaning | The history line led with what was looked up, which was the detour, not the journey |
+| "Either 8:30 or 9:00?" — "yes, that works" | Offering two times invites an answer that cannot be booked on. It names one now |
 | The agent read "[insert location]" out loud | Nothing in the knowledge base gave the practice an address, and a model fills in a form |
 | The streaming voice repeated the last few words | It tracked a position in the written reply and used it to slice the spoken one |
 | With the gateway down, the dashboard loaded forever | A loading state that never resolves is the least honest thing a UI can do |
