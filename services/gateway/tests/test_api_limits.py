@@ -63,11 +63,14 @@ class TestNothingUnbounded:
     def test_redaction_has_a_ceiling(self, client):
         assert client.post("/api/redact", json={"text": "x" * (QUERY + 1)}).status_code == 422
 
-    def test_the_details_form_has_a_ceiling(self, client):
-        """The one endpoint a caller can reach without being an operator."""
-        assert client.patch(
-            "/api/calls/anything/details", json={"name": "x" * (SHORT + 1)}
-        ).status_code == 422
+    def test_the_details_form_truncates_rather_than_refuses(self, client):
+        """The one endpoint a caller can reach without being an operator.
+
+        Its keys are free-form now -- the fields are the operator's to choose -- so a length cap
+        is applied to the VALUES rather than declared per field. Truncating beats a 422 here: a
+        caller who pasted something enormous into one box should not lose the other three."""
+        response = client.patch("/api/calls/nope/details", json={"name": "x" * (SHORT + 1)})
+        assert response.status_code == 404          # no such call, but it parsed
 
     def test_a_reasonable_value_still_goes_through(self, client):
         """The caps exist to stop the absurd, not to argue with a long business name."""

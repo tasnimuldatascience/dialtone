@@ -32,6 +32,7 @@ from typing import Any
 
 from .agents.support import build_flow, build_registry
 from .brain.conversation import AgentConfig, Conversation
+from .brain.intake import load as load_intake
 from .brain.knowledge import KnowledgeBase
 from .brain.llm import Brain, LocalBrain, ScriptedBrain
 from .flow.graph import Edge, Flow, Node, NodeKind
@@ -142,6 +143,10 @@ class Platform:
             id=agent["id"], name=agent["name"], business=agent["business"],
             persona=agent["persona"], greeting=agent["greeting"], voice=agent["voice"],
             temperature=agent["temperature"], use_knowledge=agent["use_knowledge"],
+            # An agent with no schema of its own gets the default, so an existing database
+            # keeps working and an operator opts in by editing the fields rather than by
+            # having to declare them before the agent will run at all.
+            intake=load_intake(agent.get("intake")),
         )
 
     def agent_flow(self, agent: dict[str, Any]) -> Flow | None:

@@ -176,6 +176,26 @@ export interface Appointment {
 /** One thing the agent knows, and whether it is entitled to act on it. */
 export interface MemoryFact { value: string; source: string; confirmed: boolean }
 
+/**
+ * One thing the caller is asked for.
+ *
+ * Declared per agent rather than hardcoded: a clinic needs a date of birth, a garage needs a
+ * registration, a restaurant needs a party size. The form renders from this, and the validation
+ * on the server dispatches on `kind`.
+ */
+export interface IntakeField {
+  key: string
+  label: string
+  kind: 'text' | 'name' | 'phone' | 'email' | 'number' | 'age' | 'date' | 'choice' | 'longtext'
+  required: boolean
+  help: string
+  options: string[]
+  minimum: number | null
+  maximum: number | null
+  /** Whether the agent may take this from speech, or must wait for it to be typed. */
+  spoken_ok: boolean
+}
+
 export interface CallMemory {
   facts: Record<string, MemoryFact>
   when: { day: string | null; hour: number | null; minute: number; part: string | null }
@@ -185,6 +205,8 @@ export interface CallMemory {
   missing: string[]
   unconfirmed: string[]
   ready_to_book: boolean
+  /** What this agent asks for. The form is built from it. */
+  fields: IntakeField[]
 }
 
 export interface Booked {
@@ -280,8 +302,15 @@ export const api = {
 
   callMemory: (callId: string) => get<CallMemory>(`/api/calls/${callId}/memory`),
   /* Typed details outrank anything the microphone heard. See the endpoint for why. */
-  setDetails: (callId: string, body: { name?: string; phone?: string; email?: string; reason?: string }) =>
-    patch<{ memory: CallMemory; booked: Booked | null }>(`/api/calls/${callId}/details`, body),
+  setDetails: (callId: string, body: Record<string, string>) =>
+    patch<{
+      memory: CallMemory
+      booked: Booked | null
+      /** Per field, why it was not stored. */
+      problems: Record<string, string>
+      /** Per field, stored but worth a second look — a likely typo. */
+      warnings: Record<string, string>
+    }>(`/api/calls/${callId}/details`, body),
 
   campaigns: () => get<{ campaigns: Campaign[] }>('/api/campaigns'),
   createCampaign: (agentId: string, name: string) =>

@@ -44,7 +44,7 @@ async function main() {
   }
 
   const nav = async (label) => {
-    const button = page.getByRole('navigation').getByRole('button', { name: label, exact: true })
+    const button = page.getByRole('navigation').getByRole('button', { name: new RegExp(`^${label}`) })
     if (!(await button.count())) throw new Error(`no screen called ${label}`)
     await button.click()
   }

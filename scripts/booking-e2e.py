@@ -22,6 +22,7 @@ import sqlite3
 import sys
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from pathlib import Path
 
 PORT = os.environ.get("DIALTONE_PORT", "8071")
@@ -120,7 +121,10 @@ def main() -> int:
                 if event["type"] == "done":
                     print(f"  {DIM}agent  {event['agent']}{OFF}")
                     break
-            await socket.send(json.dumps({"type": "hangup"}))
+            # The flow may have reached its end node and closed the call already, which is the
+            # correct outcome rather than a failure to hang up.
+            with suppress(Exception):
+                await socket.send(json.dumps({"type": "hangup"}))
         return events
 
     events = asyncio.run(converse())
@@ -153,7 +157,7 @@ def main() -> int:
         ).fetchall()
         ok &= check("it is in the database", len(rows) == 1)
         if rows:
-            reference, starts_at, name, phone, email, reason = rows[0]
+            _ref, starts_at, name, phone, email, reason = rows[0]
             print(f"  {DIM}row: {starts_at}  {name}  {phone}  {email}  {reason}{OFF}")
             ok &= check("the row carries the typed name", name == "Tasnimul Hasan")
             ok &= check("the row carries the typed phone", phone == "(212) 555-0142")

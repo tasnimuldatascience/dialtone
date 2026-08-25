@@ -26,6 +26,7 @@ import os
 import statistics
 import time
 import urllib.request
+from contextlib import suppress
 
 PORT = os.environ.get("DIALTONE_PORT", "8071")
 BASE = f"http://127.0.0.1:{PORT}"
@@ -120,7 +121,10 @@ async def main():
             print(f"  {i:>2}. {elapsed:>6.0f}ms  {DIM}{line[:38]:38}{OFF} {reply[:60]}{flag}")
 
         memory = call("GET", f"/api/calls/{call_id}/memory")
-        await socket.send(json.dumps({"type": "hangup"}))
+        with suppress(Exception):
+            # The flow may have reached its end node and closed the call already, which is
+            # the correct outcome rather than a failure to hang up.
+            await socket.send(json.dumps({"type": "hangup"}))
 
     print(f"\n{BOLD}Latency{OFF}")
     first, last = latencies[:5], latencies[-5:]

@@ -17,12 +17,15 @@ feel slow" needs the turn, and an average cannot answer it. Aggregation happens 
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("dialtone.store")
 
 SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -38,6 +41,7 @@ CREATE TABLE IF NOT EXISTS agents (
     temperature   REAL NOT NULL DEFAULT 0.4,
     use_knowledge INTEGER NOT NULL DEFAULT 1,
     flow_json     TEXT,
+    intake_json   TEXT,                            -- what this agent asks callers for
     status        TEXT NOT NULL DEFAULT 'draft',   -- draft | live | paused
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
@@ -168,7 +172,25 @@ class Store:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(SCHEMA)
+            self._migrate()
             self._db.commit()
+
+    def _migrate(self) -> None:
+        """Add columns to a database that predates them.
+
+        `CREATE TABLE IF NOT EXISTS` covers a new table and does nothing at all for a new COLUMN,
+        so an existing database silently keeps the old shape and every read of the new field comes
+        back missing. Adding them here rather than shipping a migration tool: the set is small,
+        each one is nullable with a sensible default, and a schema this size does not justify a
+        framework.
+        """
+        for table, column, ddl in (
+            ("agents", "intake_json", "ALTER TABLE agents ADD COLUMN intake_json TEXT"),
+        ):
+            have = {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}
+            if column not in have:
+                self._db.execute(ddl)
+                log.info("added %s.%s", table, column)
 
     def close(self) -> None:
         with self._lock:
@@ -188,6 +210,7 @@ class Store:
             "temperature": float(fields.get("temperature", 0.4)),
             "use_knowledge": int(bool(fields.get("use_knowledge", True))),
             "flow_json": json.dumps(fields["flow"]) if fields.get("flow") else None,
+            "intake_json": json.dumps(fields["intake"]) if fields.get("intake") else None,
             "status": fields.get("status", "draft"),
             "created_at": now,
             "updated_at": now,
@@ -195,9 +218,9 @@ class Store:
         with self._lock:
             self._db.execute(
                 "INSERT INTO agents (id,name,business,persona,greeting,voice,temperature,"
-                "use_knowledge,flow_json,status,created_at,updated_at) VALUES "
+                "use_knowledge,flow_json,intake_json,status,created_at,updated_at) VALUES "
                 "(:id,:name,:business,:persona,:greeting,:voice,:temperature,:use_knowledge,"
-                ":flow_json,:status,:created_at,:updated_at)", row,
+                ":flow_json,:intake_json,:status,:created_at,:updated_at)", row,
             )
             self._db.commit()
         return self.get_agent(agent_id)  # type: ignore[return-value]
@@ -213,6 +236,9 @@ class Store:
         if "flow" in fields:
             sets.append("flow_json = :flow_json")
             values["flow_json"] = json.dumps(fields["flow"])
+        if "intake" in fields:
+            sets.append("intake_json = :intake_json")
+            values["intake_json"] = json.dumps(fields["intake"])
         if not sets:
             return self.get_agent(agent_id)
 
@@ -609,6 +635,8 @@ def _agent(row: sqlite3.Row) -> dict[str, Any]:
     out["use_knowledge"] = bool(out.get("use_knowledge", 1))
     flow = out.pop("flow_json", None)
     out["flow"] = json.loads(flow) if flow else None
+    intake = out.pop("intake_json", None)
+    out["intake"] = json.loads(intake) if intake else None
     return out
 
 

@@ -59,13 +59,13 @@ await page.goto(BASE, { waitUntil: 'networkidle' })
 const nav = page.getByRole('navigation')
 for (const screen of SCREENS) {
   const before = problems.length
-  await nav.getByRole('button', { name: screen, exact: true }).click()
+  await nav.getByRole('button', { name: new RegExp(`^${screen}`) }).click()
   await page.waitForTimeout(1300)
   check(screen, problems.length === before)
 }
 
 console.log('\ncall mode:')
-await nav.getByRole('button', { name: 'Live call', exact: true }).click()
+await nav.getByRole('button', { name: /^Live call/ }).click()
 await page.getByRole('tab', { name: 'Call' }).click()
 await page.waitForTimeout(300)
 await page.getByRole('button', { name: /Start call/ }).click()

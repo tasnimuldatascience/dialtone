@@ -538,3 +538,31 @@ code { font-family: var(--mono); font-size: 13px; background: var(--bg-0); borde
 .banner b { display: block; font-size: var(--t-md); font-weight: 620; color: var(--text); }
 .banner p { margin: 4px 0 0; font-size: var(--t-sm); color: var(--text-2); line-height: 1.55; }
 .banner code { margin: 0 3px; }
+
+
+/* ── intake fields ─────────────────────────────────────────────────────────
+ * The form is rendered from the agent's own schema, so these have to cover every field kind an
+ * operator can declare rather than the three that used to be hardcoded. */
+.field select, .field textarea { width: 100%; }
+.field textarea { min-height: 62px; resize: vertical; }
+
+/* A value that was refused. Red, and it replaces the help text -- the caller needs to know what
+   to change, not what the field is for. */
+.field input[data-bad], .field textarea[data-bad] {
+  border-color: var(--bad); background: #180d10;
+}
+.field input[data-bad]:focus, .field textarea[data-bad]:focus {
+  box-shadow: 0 0 0 3px #ff6b8118;
+}
+
+.field-help, .field-bad, .field-warn {
+  display: block; margin-top: 5px; font-style: normal; font-size: var(--t-xs); line-height: 1.5;
+}
+.field-help { color: var(--text-dim); }
+.field-bad { color: var(--bad); font-weight: 560; }
+.field-warn { color: var(--cost); }
+
+.field-opt {
+  font-style: normal; font-weight: 500; font-size: 10.5px; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--text-3); margin-left: auto;
+}

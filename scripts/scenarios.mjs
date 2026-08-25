@@ -54,7 +54,7 @@ const browser = await chromium.launch({
   page.on('pageerror', (e) => errors.push(e.message))
   await page.goto(BASE, { waitUntil: 'networkidle' })
 
-  await page.getByRole('navigation').getByRole('button', { name: 'Live call', exact: true }).click()
+  await page.getByRole('navigation').getByRole('button', { name: /^Live call/ }).click()
   await page.getByRole('tab', { name: 'Chat' }).click()
   await page.getByRole('button', { name: /Start chat/ }).click()
   await page.waitForTimeout(2500)
@@ -77,7 +77,7 @@ const browser = await chromium.launch({
   const page = await browser.newPage({ viewport: { width: 1024, height: 800 } })
   await page.goto(BASE, { waitUntil: 'networkidle' })
   for (const screen of ['Dashboard', 'Live call', 'Appointments']) {
-    await page.getByRole('navigation').getByRole('button', { name: screen, exact: true }).click()
+    await page.getByRole('navigation').getByRole('button', { name: new RegExp(`^${screen}`) }).click()
     await page.waitForTimeout(900)
     const overflow = await page.evaluate(() =>
       document.documentElement.scrollWidth - document.documentElement.clientWidth)

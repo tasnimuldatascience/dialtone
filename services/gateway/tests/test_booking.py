@@ -441,8 +441,19 @@ class TestWhatTheModelIsTold:
         collects those; the agent's job is the time."""
         convo, _ = self.conversation()
         note = convo._scheduling_note()
-        assert "NEVER ask for a name, a phone number" in note
+        # Built from the agent's OWN intake schema rather than a hardcoded sentence: which
+        # fields must be typed is the operator's decision, so the instruction has to follow it.
+        assert "NEVER ask for:" in note
+        for label in ("full name", "phone", "email"):
+            assert label in note
         assert "YOUR ONLY JOB RIGHT NOW is to agree a time" in note
+
+    def test_it_may_ask_about_a_field_the_operator_marked_speakable(self):
+        """The other side of it. "What brings you in" is fine spoken; a registration number is
+        not, and the schema is where that difference is declared."""
+        convo, _ = self.conversation()
+        note = convo._scheduling_note()
+        assert "You may ask about:" in note
 
     def test_the_date_is_stated_so_plainly_it_cannot_be_reasoned_away(self):
         """Given only "Today is Sunday 23 August", the model replied "today is already

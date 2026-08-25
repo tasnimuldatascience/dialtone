@@ -51,6 +51,8 @@ from ..scheduling.calendar import (
 from ..tools.registry import ToolCall, ToolRegistry, ToolTrace
 from .grounding import Grounding
 from .grounding import check as check_grounding
+from .intake import DEFAULT_INTAKE
+from .intake import Field as IntakeField
 from .knowledge import Hit, KnowledgeBase
 from .llm import Brain, Turn, build_system_prompt, split_marker
 from .memory import CallMemory, summarise
@@ -78,6 +80,9 @@ class AgentConfig:
     #: can only chat, which is occasionally what an operator wants.
     use_knowledge: bool = True
     max_turns: int = 40
+    #: What this agent asks callers for before it will book anything. Declared per agent rather
+    #: than hardcoded -- a clinic needs a date of birth, a garage needs a registration.
+    intake: list[IntakeField] = field(default_factory=lambda: list(DEFAULT_INTAKE))
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -85,6 +90,7 @@ class AgentConfig:
             "persona": self.persona, "greeting": self.greeting, "voice": self.voice,
             "temperature": self.temperature, "use_knowledge": self.use_knowledge,
             "max_turns": self.max_turns,
+            "intake": [f.as_dict() for f in self.intake],
         }
 
 
@@ -196,7 +202,7 @@ class Conversation:
         #: The slots put in front of the model on the current turn. Set while the prompt is
         #: built and read after the reply, to check whether the agent offered one of them.
         self._offered: list[Slot] = []
-        self.memory = CallMemory(today=self.today)
+        self.memory = CallMemory(today=self.today, intake=list(config.intake))
 
     # -- scheduling ---------------------------------------------------------
     def _now(self) -> datetime:
@@ -320,11 +326,20 @@ class Conversation:
         # for a surname and "abc iphone com" for an email address -- so the agent must not spend
         # turns collecting them badly. It is also the difference between an agent that sounds
         # like a receptionist and one that sounds like a form being read aloud.
-        lines.append(
-            "NEVER ask for a name, a phone number, an email address, or how to spell anything. "
-            "The caller types those on screen and you will be told them. Asking is WRONG even "
-            "if you do not know them yet. Talk only about the time."
-        )
+        # WHAT NOT TO ASK FOR OUT LOUD, derived from the schema rather than hardcoded. A field
+        # the operator marked `spoken_ok` is one the agent may ask about; everything else is
+        # typed, because recognition mangles exactly the values that have to be exact.
+        typed = [f.label.lower() for f in self.memory.fields if not f.spoken_ok]
+        if typed:
+            lines.append(
+                f"NEVER ask for: {', '.join(typed)}. Nor how to spell anything. The caller types "
+                f"those on screen and you will be told them. Asking is WRONG even if you do not "
+                f"know them yet. Talk only about the time."
+            )
+        askable = [f.label for f in self.memory.fields
+                   if f.spoken_ok and f.required and not self.memory.get(f.key)]
+        if askable:
+            lines.append(f"You may ask about: {askable[0]}.")
         return "\n".join(lines)
 
     # -- prompt ------------------------------------------------------------

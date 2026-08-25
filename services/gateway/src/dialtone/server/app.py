@@ -34,6 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from ..agents.support import build_flow, build_registry
+from ..brain.contact import check as contact_check
 from ..compliance.redact import redact
 from ..eval.endpointing import CORPUS, ablate, run, sweep
 from ..flow.graph import GuardrailError
@@ -385,12 +386,31 @@ def end_call(call_id: str) -> dict[str, Any]:
 
 
 class DetailsIn(BaseModel):
-    """What the caller typed rather than said."""
+    """What the caller typed rather than said.
 
-    name: str | None = Field(None, max_length=SHORT)
-    phone: str | None = Field(None, max_length=SHORT)
-    email: str | None = Field(None, max_length=SHORT)
-    reason: str | None = Field(None, max_length=SHORT)
+    Free-form keys, because the fields are the operator's to choose -- an agent may ask for an
+    age, a registration, a party size. Each value is checked against that agent's declared
+    schema before anything is stored; see `brain/intake.py`.
+    """
+
+    model_config = {"extra": "allow"}
+
+    def values(self) -> dict[str, str]:
+        raw = self.model_dump()
+        return {
+            str(k): str(v)[:SHORT] for k, v in raw.items()
+            if v is not None and str(k).isidentifier()
+        }
+
+
+def _field_check(memory: Any, key: str, value: str) -> Any:
+    """Validate one value against the schema this call is working to."""
+    for declared in memory.fields:
+        if declared.key == key:
+            return declared.check(value)
+    # Not a field this agent asks for. Kept, trimmed, unvalidated -- refusing it would make the
+    # API brittle against an operator adding a field the UI has not caught up with.
+    return contact_check(key, value)
 
 
 @app.get("/api/calls/{call_id}/memory")
@@ -416,14 +436,31 @@ def set_details(call_id: str, body: DetailsIn) -> dict[str, Any]:
         raise HTTPException(404, f"no live call {call_id}")
 
     memory = live.conversation.memory
-    for field_name, value in body.model_dump(exclude_none=True).items():
-        memory.tell(field_name, value, source="typed")
+    problems: dict[str, str] = {}
+    warnings: dict[str, str] = {}
+
+    for field_name, value in body.values().items():
+        # CHECKED BEFORE IT IS STORED. "hello there" was accepted as a phone number and
+        # "not-an-email" as an email address, and both went straight into an appointment -- where
+        # the first anyone finds out is a reminder that never arrives and a slot nobody keeps.
+        result = _field_check(memory, field_name, value)
+        if not result.ok:
+            problems[field_name] = result.problem
+            continue
+        if result.warning:
+            warnings[field_name] = result.warning
+        memory.tell(field_name, result.value, source="typed")
 
     # Typing the last missing detail can be the thing that completes a booking, so the same
     # check the conversation runs after a turn runs here too. Otherwise the caller fills the
     # form, nothing happens, and they have to say "yes" again to a question already answered.
     booked = live.conversation.book_if_ready()
-    return {"memory": memory.as_dict(), "booked": booked}
+    return {
+        "memory": memory.as_dict(), "booked": booked,
+        # Reported rather than raised: a caller correcting one field of three should not lose
+        # the other two, so the good values are stored and the bad ones come back named.
+        "problems": problems, "warnings": warnings,
+    }
 
 
 @app.websocket("/ws/call/{call_id}")

@@ -58,8 +58,10 @@ class Fact:
         return {"value": self.value, "source": self.source, "confirmed": self.confirmed}
 
 
-#: The values a booking needs. Named here rather than inferred, because "what does this call
-#: still need?" has to be answerable at any moment -- it is what the agent asks for next.
+#: The values a booking needs, WHEN THE AGENT HAS NOT SAID OTHERWISE. An operator declares their
+#: own -- see `brain/intake.py` -- and this is only the fallback for a call with no schema behind
+#: it. It used to be the whole story, which made the system a dental demo: a clinic needs a date
+#: of birth, a garage needs a registration, and neither could say so without editing Python.
 BOOKING_FIELDS = ("name", "phone", "email", "reason")
 
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]{2,}\b")
@@ -115,6 +117,8 @@ class CallMemory:
     booked_reference: str = ""
     #: Turns older than the verbatim window, compressed to a few lines.
     summary: str = ""
+    #: What this agent asks callers for. Empty means the fallback above.
+    intake: list[Any] = field(default_factory=list)
     turn: int = 0
 
     # -- learning ----------------------------------------------------------
@@ -158,9 +162,29 @@ class CallMemory:
         return fact.value if fact else ""
 
     @property
+    def fields(self) -> list[Any]:
+        """The intake schema this call is working to."""
+        if self.intake:
+            return self.intake
+        from .intake import DEFAULT_INTAKE
+        return DEFAULT_INTAKE
+
+    @property
     def missing(self) -> list[str]:
-        """What a booking still needs, in the order worth asking for it."""
-        return [f for f in BOOKING_FIELDS if not self.get(f)]
+        """What a booking still needs, in the order worth asking for it.
+
+        Required fields only. An optional one that nobody supplied is not a reason to refuse an
+        appointment -- it is a question the agent did not get round to.
+        """
+        return [f.key for f in self.fields if f.required and not self.get(f.key)]
+
+    @property
+    def next_question(self) -> str:
+        """The label of the next thing to ask for, or "". What the agent says next."""
+        for f in self.fields:
+            if f.required and not self.get(f.key):
+                return f.label
+        return ""
 
     @property
     def unconfirmed(self) -> list[str]:
@@ -168,7 +192,11 @@ class CallMemory:
 
         Booking on these is how "tasty mulasson" ends up in a patient record.
         """
-        return [n for n, f in self.facts.items() if not f.confirmed and n in ("name", "phone", "email")]
+        # Anything the operator has NOT marked as safe to take from speech. Recognition mangles
+        # exactly the values that have to be exact, and which those are depends on what is being
+        # asked for -- "what brings you in" is fine spoken; a registration number is not.
+        typed_only = {f.key for f in self.fields if not f.spoken_ok}
+        return [n for n, f in self.facts.items() if not f.confirmed and n in typed_only]
 
     @property
     def ready_to_book(self) -> bool:
@@ -211,7 +239,9 @@ class CallMemory:
                 f"Confirm it and do not offer to book again."
             )
         elif self.missing:
-            lines.append(f"Still needed before booking: {', '.join(self.missing)}.")
+            labels = {f.key: f.label for f in self.fields}
+            wanted = ", ".join(labels.get(k, k) for k in self.missing)
+            lines.append(f"Still needed before booking: {wanted}.")
         return "\n".join(lines)
 
     def as_dict(self) -> dict[str, Any]:
@@ -228,6 +258,7 @@ class CallMemory:
             "slot_confirmed": self.slot_confirmed,
             "booked_reference": self.booked_reference,
             "missing": self.missing,
+            "fields": [f.as_dict() for f in self.fields],
             "unconfirmed": self.unconfirmed,
             "ready_to_book": self.ready_to_book,
         }

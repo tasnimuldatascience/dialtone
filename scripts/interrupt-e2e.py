@@ -21,6 +21,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from contextlib import suppress
 
 PORT = os.environ.get("DIALTONE_PORT", "8071")
 BASE = f"http://127.0.0.1:{PORT}"
@@ -108,7 +109,10 @@ async def main() -> int:
                if p in again.lower()]
         check("it does not claim to have already said it", not bad, ", ".join(bad) or "—")
 
-        await socket.send(json.dumps({"type": "hangup"}))
+        with suppress(Exception):
+            # The flow may have reached its end node and closed the call already, which is
+            # the correct outcome rather than a failure to hang up.
+            await socket.send(json.dumps({"type": "hangup"}))
 
     # And the transcript keeps the record straight.
     record = call("GET", f"/api/calls/{call_id}")

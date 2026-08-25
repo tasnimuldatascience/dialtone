@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ViewProps } from '../App'
-import { api, openCall, type Booked, type CallMemory, type Grounding, type Hit, type Slot, type Timing } from '../api'
+import { api, openCall, type Booked, type CallMemory, type Grounding, type Hit, type IntakeField, type Slot, type Timing } from '../api'
 import { Icon } from '../components/Icon'
 import { AudioQueue, Listener, MicLevel, clearSpokenMemory, inEchoWindow, loadVoices, looksLikeEcho, rememberSpoken, resetEchoWindow, setAgentAudioProbe, speak, speechSupported, stopSpeaking, synthSupported } from '../voice'
 import { decideTurn } from '../turntaking'
@@ -348,6 +348,10 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
     try {
       const { call_id, greeting } = await api.startCall(agentId, voiceOn ? 'voice' : 'text')
       setCallId(call_id)
+      // The details form renders from the agent's intake schema, and the schema arrives with the
+      // memory. Fetched here rather than waiting for the first turn to carry it: a caller should
+      // be able to fill the form in before saying anything, which is often exactly what they do.
+      api.callMemory(call_id).then(setMemory).catch(() => undefined)
       setLines([{ who: 'agent', text: greeting }])
       rememberSpoken(greeting)
       // The gateway synthesises the greeting itself when the neural voice is loaded, so this
@@ -980,6 +984,21 @@ function SidePanel({
  * heard rather than known, and a typed value replaces it permanently. Nothing is ever booked on
  * a value the caller has not seen written down.
  */
+/* ── what the caller is asked for ────────────────────────────────────────────
+ *
+ * RENDERED FROM THE AGENT'S OWN SCHEMA, not from three hardcoded inputs. A clinic needs a date
+ * of birth, a garage needs a registration, a restaurant needs a party size — and none of them
+ * could say so while this component knew the field names in advance.
+ *
+ * WHY THE CALLER TYPES THESE AT ALL. Speech recognition is good at sentences and bad at strings,
+ * and a name, a phone number and an email address are strings. One real call produced "tasty
+ * mulasson" for a surname and "abc iphone com" for an email address — both plausible English,
+ * both wrong, and neither detectable from the transcript.
+ *
+ * So the agent never asks for them out loud. It fills in what it thinks it heard, marks that as
+ * heard rather than known, and a typed value replaces it permanently. Nothing is ever booked on
+ * a value the caller has not seen written down.
+ */
 function DetailsForm({
   live, callId, memory, onMemory, onBooked,
 }: {
@@ -989,10 +1008,14 @@ function DetailsForm({
   onMemory: (m: CallMemory) => void
   onBooked: (b: Booked) => void
 }) {
-  const [form, setForm] = useState({ name: '', phone: '', email: '' })
+  const [form, setForm] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [problems, setProblems] = useState<Record<string, string>>({})
+  const [warnings, setWarnings] = useState<Record<string, string>>({})
   const [error, setError] = useState('')
+
+  const fields = memory?.fields ?? []
 
   // Prefill from whatever the agent picked up, but ONLY into a field the caller has not touched.
   // Overwriting a typed value with a heard one would undo the correction they just made, which
@@ -1001,9 +1024,9 @@ function DetailsForm({
     if (!memory) return
     setForm((current) => {
       const next = { ...current }
-      for (const key of ['name', 'phone', 'email'] as const) {
-        const heard = memory.facts[key]?.value ?? ''
-        if (heard && !current[key]) next[key] = heard
+      for (const field of memory.fields) {
+        const heard = memory.facts[field.key]?.value ?? ''
+        if (heard && !current[field.key]) next[field.key] = heard
       }
       return next
     })
@@ -1014,14 +1037,21 @@ function DetailsForm({
     setSaving(true)
     setError('')
     try {
-      const result = await api.setDetails(callId, form)
+      const filled = Object.fromEntries(
+        Object.entries(form).filter(([, v]) => v.trim()),
+      )
+      const result = await api.setDetails(callId, filled)
       onMemory(result.memory)
+      setProblems(result.problems ?? {})
+      setWarnings(result.warnings ?? {})
       // Typing the last missing detail can be the thing that completes the booking, so the
       // server books on the way through and says so. Making the caller repeat a "yes" they have
       // already given is how software starts to feel like paperwork.
       if (result.booked) onBooked(result.booked)
-      setSaved(true)
-      window.setTimeout(() => setSaved(false), 2200)
+      if (!Object.keys(result.problems ?? {}).length) {
+        setSaved(true)
+        window.setTimeout(() => setSaved(false), 2200)
+      }
     } catch (e) {
       setError(String(e))
     } finally {
@@ -1029,11 +1059,13 @@ function DetailsForm({
     }
   }, [callId, form, onMemory, onBooked])
 
-  const dirty = (['name', 'phone', 'email'] as const).some(
-    (k) => form[k].trim() && form[k].trim() !== memory?.facts[k]?.value,
+  const dirty = fields.some(
+    (f) => (form[f.key] ?? '').trim() && (form[f.key] ?? '').trim() !== memory?.facts[f.key]?.value,
   )
-  const heardNotTyped = (k: 'name' | 'phone' | 'email') =>
-    Boolean(memory?.facts[k]?.value) && memory?.facts[k]?.confirmed === false
+  const heardNotTyped = (key: string) =>
+    Boolean(memory?.facts[key]?.value) && memory?.facts[key]?.confirmed === false
+
+  if (!fields.length) return null
 
   return (
     <div className="panel">
@@ -1044,33 +1076,95 @@ function DetailsForm({
           are the values the booking actually uses.
         </p>
 
-        {(['name', 'phone', 'email'] as const).map((key) => (
-          <label key={key} className="field">
-            <span className="field-l">
-              {key === 'name' ? 'Full name' : key === 'phone' ? 'Phone' : 'Email'}
-              {memory?.facts[key]?.confirmed && <i className="tick"><Icon name="check" size={10} /></i>}
-              {heardNotTyped(key) && <em className="field-hint">heard — please check</em>}
-            </span>
-            <input
-              value={form[key]}
-              disabled={!live}
-              data-heard={heardNotTyped(key) || undefined}
-              placeholder={key === 'phone' ? '(212) 555-0142' : key === 'email' ? 'you@example.com' : 'Sam Hassan'}
-              inputMode={key === 'phone' ? 'tel' : undefined}
-              type={key === 'email' ? 'email' : 'text'}
-              onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-              onKeyDown={(e) => { if (e.key === 'Enter') void save() }}
-            />
-          </label>
-        ))}
+        {fields.map((field) => {
+          const problem = problems[field.key]
+          const warning = warnings[field.key]
+          const value = form[field.key] ?? ''
+          return (
+            <label key={field.key} className="field">
+              <span className="field-l">
+                {field.label}
+                {!field.required && <em className="field-opt">optional</em>}
+                {memory?.facts[field.key]?.confirmed && !problem && (
+                  <i className="tick"><Icon name="check" size={10} /></i>
+                )}
+                {heardNotTyped(field.key) && <em className="field-hint">heard — please check</em>}
+              </span>
 
-        <button className="btn btn-primary btn-wide" disabled={!live || saving || !dirty} onClick={() => void save()}>
+              {field.kind === 'choice' ? (
+                <select
+                  value={value}
+                  disabled={!live}
+                  onChange={(e) => setForm((f) => ({ ...f, [field.key]: e.target.value }))}
+                >
+                  <option value="">Choose…</option>
+                  {field.options.map((o) => <option key={o} value={o}>{o}</option>)}
+                </select>
+              ) : field.kind === 'longtext' ? (
+                <textarea
+                  value={value}
+                  disabled={!live}
+                  rows={3}
+                  data-bad={problem ? true : undefined}
+                  onChange={(e) => setForm((f) => ({ ...f, [field.key]: e.target.value }))}
+                />
+              ) : (
+                <input
+                  value={value}
+                  disabled={!live}
+                  data-heard={heardNotTyped(field.key) || undefined}
+                  data-bad={problem ? true : undefined}
+                  placeholder={placeholderFor(field)}
+                  inputMode={inputModeFor(field)}
+                  type={field.kind === 'email' ? 'email' : field.kind === 'date' ? 'date' : 'text'}
+                  onChange={(e) => setForm((f) => ({ ...f, [field.key]: e.target.value }))}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void save() }}
+                />
+              )}
+
+              {/* A problem outranks the help text: the caller needs to know what to change,
+                  not what the field is for. */}
+              {problem
+                ? <em className="field-bad">{problem}</em>
+                : warning
+                  ? <em className="field-warn">{warning}</em>
+                  : field.help && <em className="field-help">{field.help}</em>}
+            </label>
+          )
+        })}
+
+        <button
+          className="btn btn-primary btn-wide"
+          disabled={!live || saving || !dirty}
+          onClick={() => void save()}
+        >
           {saving ? 'Saving…' : saved ? 'Saved' : 'Save details'}
         </button>
         {error && <div className="note" data-t="bad" style={{ marginTop: 8, fontSize: 11.5 }}>{error}</div>}
       </div>
     </div>
   )
+}
+
+function placeholderFor(field: IntakeField): string {
+  switch (field.kind) {
+    case 'phone': return '(212) 555-0142'
+    case 'email': return 'you@example.com'
+    case 'name': return 'Sam Hassan'
+    case 'age': return '34'
+    case 'date': return 'YYYY-MM-DD'
+    case 'number': return field.minimum != null ? String(field.minimum) : '0'
+    default: return ''
+  }
+}
+
+function inputModeFor(field: IntakeField): 'tel' | 'numeric' | 'email' | undefined {
+  switch (field.kind) {
+    case 'phone': return 'tel'
+    case 'email': return 'email'
+    case 'age': case 'number': return 'numeric'
+    default: return undefined
+  }
 }
 
 
