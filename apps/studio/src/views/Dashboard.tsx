@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ViewProps } from '../App'
 import { api, type CallRow, type Overview } from '../api'
 import { Icon } from '../components/Icon'
+import { Happened } from '../components/CallCells'
 
 /* What an operator looks at first.
  *
@@ -143,9 +144,8 @@ export function Dashboard({ navigate, ready, offline }: ViewProps) {
               <thead>
                 <tr>
                   <th>What they wanted</th>
+                  <th>What happened</th>
                   <th>Agent</th>
-                  <th>Outcome</th>
-                  <th>Mood</th>
                   <th style={{ textAlign: 'right' }}>Turns</th>
                   <th style={{ textAlign: 'right' }}>Length</th>
                 </tr>
@@ -153,10 +153,12 @@ export function Dashboard({ navigate, ready, offline }: ViewProps) {
               <tbody>
                 {recent.map((c) => (
                   <tr key={c.id} data-clickable onClick={() => navigate({ view: 'calls', callId: c.id })}>
-                    <td style={{ maxWidth: 320 }}>{c.summary || <span style={{ color: 'var(--text-3)' }}>no speech</span>}</td>
+                    <td style={{ maxWidth: 300 }}>
+                      <div className="wanted">{c.wanted || c.summary || 'Nobody spoke'}</div>
+                      {c.wanted && c.summary && <div className="said">“{c.summary}”</div>}
+                    </td>
+                    <td><Happened call={c} /></td>
                     <td style={{ color: 'var(--text-2)' }}>{c.agent_name}</td>
-                    <td><Outcome value={c.outcome} escalated={!!c.escalated} /></td>
-                    <td><Mood value={c.sentiment} /></td>
                     <td className="n">{c.turn_count}</td>
                     <td className="n">{(c.duration_ms / 1000).toFixed(1)}s</td>
                   </tr>
@@ -244,15 +246,4 @@ function Sentiment({ counts, total }: { counts: Record<string, number>; total: n
   )
 }
 
-export function Outcome({ value, escalated }: { value: string; escalated: boolean }) {
-  if (escalated || value === 'transferred') return <span className="chip" data-t="cost">passed to a person</span>
-  if (value === 'completed') return <span className="chip" data-t="good">handled</span>
-  if (value === 'abandoned') return <span className="chip" data-t="bad">caller hung up</span>
-  if (value === 'in_progress') return <span className="chip" data-t="accent">in progress</span>
-  return <span className="chip">{value}</span>
-}
 
-export function Mood({ value }: { value: string }) {
-  const tone = value === 'positive' ? 'good' : value === 'negative' ? 'bad' : undefined
-  return <span className="chip" data-t={tone}>{value}</span>
-}

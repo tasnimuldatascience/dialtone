@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { ViewProps } from '../App'
 import { api, type CallDetail, type CallRow, type Timing } from '../api'
 import { Icon } from '../components/Icon'
-import { Mood } from './Dashboard'
+import { Happened, Mood } from '../components/CallCells'
 
 /* Reading a call back.
  *
@@ -131,31 +131,6 @@ const RESULTS: { key: string; label: string }[] = [
  *
  * A booked call carries its reference, because that is the thing somebody quotes back.
  */
-function Happened({ call }: { call: CallRow }) {
-  if (call.result === 'booked') {
-    const at = call.booked_for ? new Date(call.booked_for) : null
-    return (
-      <div className="happened" data-t="booked">
-        <Icon name="check" size={13} />
-        <span>
-          Booked
-          {at && <em>{at.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}, {at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</em>}
-        </span>
-        <code className="ref">{call.booked_reference}</code>
-      </div>
-    )
-  }
-  if (call.result === 'passed on') {
-    return <div className="happened" data-t="warn"><Icon name="user" size={13} /><span>Passed to a person</span></div>
-  }
-  if (call.result === 'no speech') {
-    return <div className="happened" data-t="quiet"><span>Nobody spoke</span></div>
-  }
-  if (call.result === 'abandoned') {
-    return <div className="happened" data-t="warn"><Icon name="x" size={13} /><span>Hung up</span></div>
-  }
-  return <div className="happened"><Icon name="chat" size={13} /><span>Questions answered</span></div>
-}
 
 function Detail({ call, onBack }: { call: CallDetail; onBack: () => void }) {
   const latencies = call.turns.map((t) => t.timing?.total_ms ?? 0).filter(Boolean).sort((a, b) => a - b)

@@ -4,7 +4,7 @@
 
 **An AI phone agent that knows when you have finished talking.**
 
-[![tests](https://img.shields.io/badge/tests-603%20passing-4ade80?style=flat-square)](#run-it)
+[![tests](https://img.shields.io/badge/tests-629%20passing-4ade80?style=flat-square)](#run-it)
 [![python](https://img.shields.io/badge/python-3.12%2B-35e0d0?style=flat-square)](#run-it)
 [![typescript](https://img.shields.io/badge/typescript-5.6-35e0d0?style=flat-square)](#run-it)
 [![license](https://img.shields.io/badge/license-MIT-8ea0b5?style=flat-square)](LICENSE)
@@ -288,7 +288,7 @@ You need Python 3.12+ and Node 20+. No API keys. No GPU. Nothing paid.
 cd services/gateway
 pip install -e ".[serve,dev]"
 
-pytest                    # 502 tests
+pytest                    # 521 tests
 dialtone bench ablate     # see the results table
 dialtone serve            # starts on http://127.0.0.1:8071
 
@@ -412,12 +412,10 @@ caught it — which is the interesting part.
 | 4 | 3427ms | 5929ms | 1.9× |
 | 8 | **5287ms** | 8100ms | 2.6× |
 
-**The three was a guess wearing the clothes of a measurement.** The sweep above ran 1, 2, 4 and 8;
-three was picked by splitting the difference and written up with a table beside it, which is how a
-number ends up looking rigorous and being an interpolation. Running three real callers put the
-median turn at 5.2 seconds on voice and 5.7 on text. That is not a phone call. Two holds at 3.3s
-typed and 3.6s spoken, so the limit is two, and the lesson is that the row you did not run is the
-row that is wrong.
+**Three was a guess wearing the clothes of a measurement.** The sweep ran 1, 2, 4 and 8; three
+was interpolated and published with a table beside it. Running three real callers put the median
+turn at 5.2s on voice and 5.7s on text -- not a phone call. Two holds at 3.3s / 3.6s. The row you
+did not run is the row that is wrong.
 
 **Nothing failed at eight**, and that is exactly the problem. The system did not refuse anybody;
 it degraded everybody. Every caller waited more than five seconds for the first word — from a
@@ -451,10 +449,9 @@ indistinguishable from having no limit right up until the day it is hit.
 
 ### What only breaks when calls overlap
 
-Latency is the obvious cost of concurrency and the least interesting one. The failures that
-matter are the ones that cannot happen to a single call, so `scripts/multi-client.py` runs five at
-once on both channels — a spoken booking, a typed booking, two questions and somebody who never
-speaks — and asserts on the overlap:
+Latency is the obvious cost of concurrency and the least interesting one. `scripts/multi-client.py`
+runs five callers at once on both channels — a spoken booking, a typed booking, two questions and
+somebody who never speaks — and asserts on what cannot fail to a single call:
 
 | what it checks | why it can only fail here |
 |---|---|
@@ -466,16 +463,14 @@ speaks — and asserts on the overlap:
 | latency, split by channel | a voice turn also pays for synthesis; averaging the two hides both |
 
 **It found a real one on the first run.** Two callers were offered tomorrow at eight thirty —
-correctly, it was free when each was offered it — and one of them booked it. `starts_at` is
-`UNIQUE`, so the INSERT failed and there was no double booking. The guarantee worked perfectly.
+correctly, it was free when each was offered it — and one booked it. `starts_at` is `UNIQUE`, the
+second INSERT failed, and there was no double booking. The guarantee worked perfectly.
 
-Nobody told the other caller. They had said *"yes, that works"*, and the appointment simply never
-existed; the conversation gave no sign of it. **That is worse than the double booking it was
-preventing**, because a double booking is at least visible to somebody. The fix is not in the
-schema — the schema was right — it is that the loser is now told the time has gone, the agreement
-is cleared, and the nearest alternative is offered in the same breath. The *day* survives the
-clearing, so *"how about eleven then"* still has something to attach to; an earlier version reset
-the whole request and a recovery test caught it.
+Nobody told the other caller. They had said *"yes, that works"* and the appointment never existed.
+**That is worse than the double booking it prevented**, because a double booking is at least
+visible to somebody. The schema was right; the silence was the bug. The loser is now told, the
+agreement cleared, and the nearest alternative offered in the same breath — keeping the *day* they
+asked for, so *"how about eleven then"* still has something to attach to.
 
 ```console
 $ python scripts/multi-client.py
@@ -497,29 +492,23 @@ Every call is on one screen, and the column that matters is the first one.
 
 ![Call history](docs/img/calls.png)
 
-**"What they wanted" used to be the first line of the transcript.** That works for a one-turn
-question — *"how much is a check-up?"* is both the opening line and the entire call — and says
-nothing about anything longer. An eleven-turn booking read *"hi, I need an appointment, my tooth
-is hurting"*, which is where it STARTED. It is not what the call was about.
+**"What they wanted" used to be the first line of the transcript.** Fine for a one-turn question,
+useless for anything longer — an eleven-turn booking read *"hi, I need an appointment, my tooth is
+hurting"*, which is where it started, not what it was about. It is derived from what the call *did*
+instead: the reason extracted, the documents looked up, whether it booked, whether it handed over.
+No model call, so it costs nothing at teardown. The caller's own words are quoted underneath.
 
-It is derived from what the call DID instead: the reason the agent extracted, the documents it
-had to look up, whether it booked, whether it handed over. No model call — a summary that costs a
-generation on every teardown is a summary an operator turns off. The caller's own words are still
-there, quoted, underneath.
-
-"What happened" was worse: `completed` on all sixteen rows, and `neutral` beside it. A column with
-one value in it is not information, it is furniture. There are five outcomes now and every one of
-them is a fact from the database rather than a status string — `Booked` carries the date and the
-reference, `Passed to a person` means the flow reached `handoff`, `Nobody spoke` means no caller
-turn was ever recorded. The tabs count them, so "show me the calls that booked" is one click.
+"What happened" was worse — `completed` on all sixteen rows. A column with one value in it is not
+information, it is furniture. Five outcomes now, each a fact from the database rather than a status
+string: `Booked` carries the date and reference, `Passed to a person` means the flow reached
+`handoff`, `Nobody spoke` means no caller turn was recorded. The tabs count them.
 
 ![One call](docs/img/call-detail.png)
 
-Opening a call shows the transcript with the flow moves and the documents cited **inline under
-each reply** — `greet → preferred_day · Emergencies` — so "why did it say that?" is answered by
-reading rather than by correlating logs. Timings are per turn and measured, the appointment is
-the database row rather than a claim the agent made, and unverified numbers and redactions are
-counted at the top: two zeroes that are worth showing precisely because they are usually zero.
+Opening a call shows the transcript with the flow moves and cited documents **inline under each
+reply** — `greet → preferred_day · Emergencies` — so "why did it say that?" is answered by reading
+rather than by correlating logs. Timings are per turn and measured; the appointment shown is the
+database row, not a claim the agent made.
 
 ---
 
@@ -710,15 +699,12 @@ It asked on every single call. Deleting it is what fixed it.
 
 ### A drawn edge is not a reachable one
 
-Five of those six paths end at `handoff`, and until this week **none of them could be taken**.
+Five of those six paths end at `handoff`, and none of them could be taken.
 
-The graph is advanced by code rather than by the model — a 1.5B model asked to append `[[node_id]]`
-to a phone reply does not do it, and a trace of a real booking showed every turn still sitting on
-`greet`. So `_advance` moves on when a step is demonstrably finished, and it took `legal[0]`: the
-ordinary continuation, which graph authors put first. The escape hatches were never first. They
-were never taken.
-
-What that looked like from the caller's side:
+The graph is advanced by code, not by the model — a 1.5B model does not append `[[node_id]]` to a
+phone reply, and a trace showed every turn still sitting on `greet`. So `_advance` moves on when a
+step is finished, and it took `legal[0]`: the ordinary continuation, which authors put first. The
+escape hatches were never first.
 
 ```
 caller:  I want to speak to a human please
@@ -726,16 +712,14 @@ agent:   I'm sorry to hear that. Can you please provide me with your full name�
          result: answered
 ```
 
-Two things were wrong and only one of them is the edge. A request for a person **does not satisfy
-the step it arrives at** — it will never collect a reason — so a transfer that waits for the step
-to finish waits forever. And the check has to run **before the reply is written**: the first
-version moved after generation, which marked the call transferred correctly and still answered
-from the objective of the step being abandoned. Half-right is not right.
+The edge was only half of it. A request for a person **never satisfies the step it arrives at** —
+it will not collect a reason — so a transfer that waits for the step waits forever. And it has to
+run **before the reply is written**; moving after generation marks the call transferred and still
+answers from the objective being abandoned.
 
-**Distress is deliberately not implemented**, though two edges name it. A word list for "sounds
-distressed" fires on *"it really hurts"* — which at a dental practice is not a request for a
-supervisor, it is the reason they rang, and booking them in is the correct answer. An explicit
-request is unambiguous; distress is not, and guessing wrong costs the caller their appointment.
+**Distress is deliberately not implemented**, though two edges name it. A word list for it fires on
+*"it really hurts"*, which at a dental practice is the reason they rang, not a request for a
+supervisor — and booking them in is the right answer.
 
 ### Slow tools need covering
 
@@ -870,7 +854,7 @@ agents feel like a walkie-talkie.
 
 ## Tests
 
-502 in the gateway, 108 in the browser, and five scripts that drive the whole thing for real.
+521 in the gateway, 108 in the browser, and five scripts that drive the whole thing for real.
 Each is named after the problem it prevents, not the function it calls:
 
 ```
@@ -884,7 +868,7 @@ test_a_time_that_does_not_exist_is_refused_even_on_a_free_day
 ```
 
 ```bash
-cd services/gateway && pytest          # 502
+cd services/gateway && pytest          # 521
 cd apps/studio      && npm test        # 108
 npm run smoke                          # every screen, in Chromium, with a fake microphone
 npm run scenarios                      # gateway down, socket dropped, 1024px, keyboard only
@@ -892,6 +876,7 @@ python scripts/booking-e2e.py          # a real call, then a look in the databas
 python scripts/interrupt-e2e.py        # talk over the agent, check what it thinks it said
 python scripts/long-call.py            # thirty turns, and print all of them
 python scripts/multi-client.py         # five callers at once, and what crosses between them
+python scripts/check-docs.py           # every link, image and badge in these docs
 ```
 
 `long-call.py` earns its place. Every structural check in it passed the first time — no crash, no
@@ -899,31 +884,10 @@ empty reply, no repetition, 1.09× latency drift, and the caller's name survived
 Every bug it found was in the content, and only by reading the transcript. So it prints the whole
 conversation rather than a verdict.
 
-Some exist because the code was wrong first:
+Some of them exist because the code was wrong first — twenty real failures, each with a test
+that fails without its fix. They are collected in **[docs/DEBUGGING.md](docs/DEBUGGING.md)**,
+which is worth a read on its own: almost none were found by reading code.
 
-| The bug | Why it mattered |
-|---|---|
-| The simulator ran callers at 3000 words per minute | Every speed measurement taken against it was meaningless |
-| Audio length was counted as it played, not up front | Interruption handling silently did nothing at all |
-| Replaying a test call changed the test call | Running it twice tested less the second time |
-| One "mm-hmm" got counted 63 times | The check runs 50 times a second and nothing reset it |
-| The agent transcribed its own voice and replied to it | Open speakers. Flags went stale between audio chunks, so the guard now asks the audio clock |
-| One spoken sentence became four replies | Two clocks disagreed and nothing tracked what had already been sent |
-| `sam@example.com` set the appointment reason to "check-up" | "example" contains "exam", and the match was on substrings |
-| The caller was told a free morning was full | The prompt said so whenever they had not yet named an hour — which is most of the time |
-| **The agent said an appointment was booked when it was not** | The worst thing it can do: the caller hangs up satisfied and finds out on the day. Claims are checked against the database now |
-| The agent answered its own sentences | The memory of having spoken expired while the audio was still playing — timed from when it was queued, not when it was heard |
-| The whole weight system never rendered | `Inter` was declared and never loaded, so ten weights fell back to two |
-| It never asked for the missing details | It was told not to ask for an email out loud, and never told to ask for anything else instead |
-| "One more thing" was parsed as one o'clock | It silently moved an appointment already agreed for nine thirty |
-| **"I want to speak to a human" was answered by asking what they needed booked** | The `handoff` node existed and three nodes had an edge to it. `_advance` always took the first edge, so the transfer was unreachable |
-| "Are you open on Saturday?" was filed as wanting a Saturday appointment | The plural was fixed with a word boundary. That was the wrong diagnosis — the question is about the practice, not about a date |
-| **A caller lost a race for a slot and was never told** | The `UNIQUE` constraint worked perfectly. They had agreed a time, the appointment did not exist, and nothing in the conversation said so |
-| "Asked about prices — cleaning" for someone booking a cleaning | The history line led with what was looked up, which was the detour, not the journey |
-| "Either 8:30 or 9:00?" — "yes, that works" | Offering two times invites an answer that cannot be booked on. It names one now |
-| The agent read "[insert location]" out loud | Nothing in the knowledge base gave the practice an address, and a model fills in a form |
-| The streaming voice repeated the last few words | It tracked a position in the written reply and used it to slice the spoken one |
-| With the gateway down, the dashboard loaded forever | A loading state that never resolves is the least honest thing a UI can do |
 
 ---
 

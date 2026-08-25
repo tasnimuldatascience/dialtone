@@ -639,16 +639,26 @@ class Store:
 
 
 def _dense_days(rows: list[dict[str, Any]], *, days: int) -> list[dict[str, Any]]:
-    """A contiguous daily series ending today, zero-filled where nothing happened."""
-    from datetime import date, timedelta
+    """A contiguous daily series ending today, zero-filled where nothing happened.
+
+    TODAY ACCORDING TO THE SAME CLOCK THE ROWS WERE WRITTEN BY. `started_at` is UTC -- `_now()`
+    makes sure of it -- and this used `date.today()`, which is local. The two agree for most of
+    the day and disagree every evening west of Greenwich, at which point calls are keyed to a
+    date the window does not contain: the chart loses the whole of today and the caption reads
+    "0 in a fortnight" beside a metric saying nine calls were handled.
+
+    A bug that only appears after 8pm is a bug nobody reproduces in the morning.
+    """
+    from datetime import timedelta
 
     found = {r["day"]: r for r in rows}
-    today = date.today()
+    today = datetime.now(UTC).date()
     out: list[dict[str, Any]] = []
     for offset in range(days - 1, -1, -1):
         key = (today - timedelta(days=offset)).isoformat()
         out.append(found.get(key) or {"day": key, "calls": 0, "resolved": 0})
     return out
+
 
 def _percentile(values: list[float], q: float) -> float:
     if not values:
