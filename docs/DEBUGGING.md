@@ -1,7 +1,7 @@
 # What broke
 
 Every bug in this table was real, is fixed, and has a test that fails without the fix. Together
-they are why the gateway suite is 521 tests rather than 300: a suite grows either because somebody
+they are why the gateway suite is 538 tests rather than 300: a suite grows either because somebody
 sat down to raise a coverage figure, or because something broke in front of a caller. This is the
 second kind.
 

@@ -100,3 +100,33 @@ class TestWhatIsSaidInstead:
         convo = booked_call()
         said = convo._confirm_booking()
         assert convo.memory.booked_reference and convo.memory.booked_reference in said
+
+
+class TestGroundingLeavesItAlone:
+    """A sentence written here is not a sentence to fact-check.
+
+    SEEN IN THE RECORDED TOUR. The confirmation reads "That is booked for you -- tomorrow at eight
+    thirty in the morning. Your reference is NGC974FE", and underneath it the transcript carried
+    "30 is not in any document the agent was given".
+
+    It is not in a document, and it does not need to be. It is the time of an appointment that
+    exists, taken from the calendar and written by `_confirm_booking`. Grounding is a check on the
+    MODEL -- running it over text the model did not write trains an operator to ignore the one
+    warning in the product that should never be ignored.
+    """
+
+    @staticmethod
+    def spoken(convo: Conversation) -> str:
+        return convo._confirm_booking()
+
+    def test_the_confirmation_names_a_time_that_is_not_in_any_document(self):
+        """The premise. If this stopped being true the guard below would be pointless."""
+        convo = booked_call()
+        assert any(ch.isdigit() for ch in self.spoken(convo)) or "thirty" in self.spoken(convo)
+
+    def test_it_is_built_only_from_state_the_database_gave_us(self):
+        convo = booked_call()
+        said = self.spoken(convo)
+        assert convo.memory.booked_reference in said
+        assert convo.memory.proposed_slot in said
+

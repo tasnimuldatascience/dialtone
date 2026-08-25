@@ -593,11 +593,14 @@ class Conversation:
         # the reason, because "no" without a reason is its own kind of unhelpful.
         false_booking = ""
         unannounced = ""
+        #: Set when one of the guards above replaces the reply. See the grounding call below.
+        written_here = False
         if not self.memory.booked_reference:
             false_booking = claims_a_booking(reply)
             if false_booking:
                 log.warning("false booking claim %r on %s", false_booking, self.call_id)
                 reply = self._why_not_booked()
+                written_here = True
 
         # AND THE MIRROR OF IT. The guard above catches the model saying an appointment exists
         # when it does not. This catches the opposite, which is just as damaging and had no guard
@@ -619,13 +622,25 @@ class Conversation:
                         self.memory.booked_reference, self.call_id)
             unannounced = self.memory.booked_reference
             reply = self._confirm_booking()
+            written_here = True
 
         timing.mark("speak")
 
         # Check the reply's numbers against the passages the model was actually given -- not
         # against the whole knowledge base, because a figure from a document that was never
         # retrieved is still a figure the model did not read.
-        grounding = check_grounding(reply, knowledge_text)
+        #
+        # NOT WHEN THE SENTENCE CAME FROM HERE. `_confirm_booking` and `_why_not_booked` are
+        # written from `booked_reference` and `proposed_slot`, which came out of the database and
+        # the calendar. Checking them against retrieved documents asks the wrong question and gets
+        # the wrong answer: a recorded demo shows "That is booked for you -- tomorrow at eight
+        # thirty in the morning" carrying the warning "30 is not in any document the agent was
+        # given". It is not in a document, and it does not need to be. It is the time of an
+        # appointment that exists.
+        #
+        # Grounding is a check on the MODEL. Running it on text the model did not write teaches an
+        # operator to ignore the one warning in the product that should never be ignored.
+        grounding = Grounding() if written_here else check_grounding(reply, knowledge_text)
         if not grounding.ok:
             yield {"type": "grounding", **grounding.as_dict()}
 

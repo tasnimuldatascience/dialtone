@@ -4,10 +4,15 @@
 
 **An AI phone agent that knows when you have finished talking.**
 
-[![tests](https://img.shields.io/badge/tests-629%20passing-4ade80?style=flat-square)](#run-it)
+[![tests](https://img.shields.io/badge/tests-646%20passing-4ade80?style=flat-square)](#run-it)
 [![python](https://img.shields.io/badge/python-3.12%2B-35e0d0?style=flat-square)](#run-it)
 [![typescript](https://img.shields.io/badge/typescript-5.6-35e0d0?style=flat-square)](#run-it)
 [![license](https://img.shields.io/badge/license-MIT-8ea0b5?style=flat-square)](LICENSE)
+
+[**▶ Watch the four-minute tour**](https://youtu.be/M9FF-aht5CU) — the whole pipeline, recorded
+against the running system.
+
+[![Watch the tour](docs/img/tour.png)](https://youtu.be/M9FF-aht5CU)
 
 </div>
 
@@ -288,7 +293,7 @@ You need Python 3.12+ and Node 20+. No API keys. No GPU. Nothing paid.
 cd services/gateway
 pip install -e ".[serve,dev]"
 
-pytest                    # 521 tests
+pytest                    # 538 tests
 dialtone bench ablate     # see the results table
 dialtone serve            # starts on http://127.0.0.1:8071
 
@@ -830,6 +835,7 @@ apps/studio/src/
 scripts/
 ├── booking-e2e.py        a real call against the real model, then checks the database
 ├── multi-client.py       five callers at once, both channels, checking the overlap
+├── demo-video.mjs        the tour, driven against the running system rather than edited
 └── smoke.mjs             every screen in a real browser, with a fake microphone
 ```
 
@@ -854,7 +860,7 @@ agents feel like a walkie-talkie.
 
 ## Tests
 
-521 in the gateway, 108 in the browser, and five scripts that drive the whole thing for real.
+538 in the gateway, 108 in the browser, and five scripts that drive the whole thing for real.
 Each is named after the problem it prevents, not the function it calls:
 
 ```
@@ -868,7 +874,7 @@ test_a_time_that_does_not_exist_is_refused_even_on_a_free_day
 ```
 
 ```bash
-cd services/gateway && pytest          # 521
+cd services/gateway && pytest          # 538
 cd apps/studio      && npm test        # 108
 npm run smoke                          # every screen, in Chromium, with a fake microphone
 npm run scenarios                      # gateway down, socket dropped, 1024px, keyboard only
@@ -877,6 +883,15 @@ python scripts/interrupt-e2e.py        # talk over the agent, check what it thin
 python scripts/long-call.py            # thirty turns, and print all of them
 python scripts/multi-client.py         # five callers at once, and what crosses between them
 python scripts/check-docs.py           # every link, image and badge in these docs
+```
+
+The tour at the top of this page is generated the same way — three scripts, no editor, and the
+output is not committed:
+
+```bash
+python scripts/narrate.py              # speak the script, and measure every line
+node   scripts/demo-video.mjs          # drive the real product, paced to those measurements
+python scripts/soundtrack.py           # lay the audio in at the recorded offsets, encode MP4
 ```
 
 `long-call.py` earns its place. Every structural check in it passed the first time — no crash, no
