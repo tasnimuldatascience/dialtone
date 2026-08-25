@@ -622,3 +622,9 @@ code { font-family: var(--mono); font-size: 13px; background: var(--bg-0); borde
 .outcome b { display: block; font-size: var(--t-md); font-weight: var(--w-strong); color: var(--text); }
 .outcome p { margin: 3px 0 0; font-size: var(--t-sm); color: var(--text-2); }
 .outcome .ref { margin-left: auto; flex-shrink: 0; }
+
+.field-need {
+  font-style: normal; font-weight: var(--w-strong); font-size: 10.5px; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--cost);
+  padding: 1px 6px; border-radius: 99px; background: #1c1508; border: 1px solid #46381c;
+}

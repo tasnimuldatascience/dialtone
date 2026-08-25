@@ -171,14 +171,42 @@ const normalise = (text: string): string[] =>
   text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
 
 /** Remember an utterance so its echo can be recognised for the next few seconds. */
-export function rememberSpoken(text: string): void {
+/**
+ * How long after a sentence has finished PLAYING it is still recognisable as the agent's own.
+ *
+ * Covers the recogniser's reporting delay plus the speakers settling.
+ */
+export const SPOKEN_MEMORY_MS = 4000
+
+/**
+ * Remember that the agent said this, so its echo can be recognised whenever it arrives.
+ *
+ * `holdMs` is how long from NOW the words remain the agent's — and it has to be supplied by
+ * whoever knows when the audio will finish PLAYING.
+ *
+ * THE BUG THIS SIGNATURE EXISTS TO PREVENT. It used to expire six seconds after being called,
+ * and it is called when a chunk is SCHEDULED. Every chunk of a reply is scheduled within a second
+ * or two; they play over the following ten. So the last sentence of a long reply came out of the
+ * speaker, echoed into the microphone, and was checked against a memory that had expired several
+ * seconds earlier. The agent then answered its own sentence:
+ *
+ *     agent:  "Sure, our usual working hours are from eight thirty to six..."
+ *     caller: "Our usual working hours are from 8:30 in the morning to six..."   <- the agent
+ *     agent:  "We regret to inform you that we are currently unable to..."
+ *
+ * This is the same mistake as the flag that went stale between chunks, in a different variable:
+ * anything timed from when audio was QUEUED is measuring the wrong clock.
+ */
+export function rememberSpoken(text: string, holdMs = SPOKEN_MEMORY_MS): void {
   const words = normalise(text)
   if (words.length < 2) return
   const now = Date.now()
-  // Long enough to cover recognition lag and a slow chunk; short enough that a caller genuinely
-  // repeating the agent's words a few seconds later is still heard.
-  spokenRecently.push({ words: new Set(words), until: now + 6000 })
-  while (spokenRecently.length && spokenRecently[0].until < now) spokenRecently.shift()
+  const until = now + Math.max(holdMs, SPOKEN_MEMORY_MS)
+  spokenRecently.push({ words: new Set(words), until })
+  // Sorted by insertion, not by expiry, so sweep the whole list rather than only the head.
+  for (let i = spokenRecently.length - 1; i >= 0; i -= 1) {
+    if (spokenRecently[i].until < now) spokenRecently.splice(i, 1)
+  }
 }
 
 /**
@@ -188,14 +216,41 @@ export function rememberSpoken(text: string): void {
  * deliberately high: a caller answering "yes" or "Thursday" shares words with the question they
  * were asked, and rejecting those would make the agent deaf to the most common replies there are.
  */
+/**
+ * TWO RATIOS, NOT ONE, and the second is what makes this usable.
+ *
+ * `borrowed` is how much of the TRANSCRIPT came from the agent. On its own it cannot tell an
+ * echo from a caller answering the question — "Thursday at two please" is four words, three of
+ * them the agent's, and it scored 0.75. Swallowing that means the agent goes deaf to the answer
+ * it just asked for, which is worse than occasionally hearing itself.
+ *
+ * `covered` is how much of what the AGENT SAID appears in the transcript, and it separates them
+ * cleanly, because an echo is a reproduction and an answer is a fragment. Measured on the call
+ * that prompted this:
+ *
+ *     echo   "hello how can i assist you today"     borrowed 1.00   covered 1.00
+ *     echo   "We are currently unable to accom..."  borrowed 1.00   covered 0.65
+ *     echo   "Our usual working hours are from..."  borrowed 0.88   covered 0.63
+ *     answer "Thursday at two in the afternoon"     borrowed 1.00   covered 0.50
+ *     answer "Thursday at two please"               borrowed 0.75   covered 0.25
+ *
+ * Both columns are needed. Neither separates the set alone.
+ */
+const ECHO_BORROWED = 0.75
+const ECHO_COVERED = 0.6
+
 export function looksLikeEcho(text: string): boolean {
   const words = normalise(text)
   if (words.length < 3) return false          // too short to judge; let the mute handle it
+  const unique = new Set(words)
   const now = Date.now()
   for (const entry of spokenRecently) {
     if (entry.until < now) continue
-    const shared = words.filter((w) => entry.words.has(w)).length
-    if (shared / words.length >= 0.75) return true
+    const borrowed = words.filter((w) => entry.words.has(w)).length / words.length
+    if (borrowed < ECHO_BORROWED) continue
+    let shared = 0
+    for (const w of entry.words) if (unique.has(w)) shared += 1
+    if (shared / entry.words.size >= ECHO_COVERED) return true
   }
   return false
 }
@@ -522,6 +577,13 @@ export class AudioQueue {
     this.playAt = startAt + buffer.duration
     this.timeline.push({ text, startAt, endAt: this.playAt })
 
+    // Remembered until this chunk has actually FINISHED PLAYING, plus the guard -- not until a
+    // fixed interval after it was queued. See rememberSpoken for what that cost.
+    if (text) {
+      const remaining = Math.max(0, this.playAt - context.currentTime) * 1000
+      rememberSpoken(text, remaining + SPOKEN_MEMORY_MS)
+    }
+
     this.pending += 1
     this.active.add(source)
     source.onended = () => {
@@ -599,9 +661,14 @@ export class AudioQueue {
   }
 
   /** Mark the agent as speaking, and remember the words so their echo can be recognised. */
-  markSpeaking(text?: string): void {
+  /**
+   * Mark the agent as speaking.
+   *
+   * No longer remembers the words: `push` does that, because only it knows when the chunk will
+   * finish playing. Doing it here as well would re-arm the memory from the wrong clock.
+   */
+  markSpeaking(): void {
     agentSpeaking = true
-    if (text) rememberSpoken(text)
   }
 
   markDone(): void {

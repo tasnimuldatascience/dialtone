@@ -155,6 +155,10 @@ class TurnRecord:
     #: Surfaced rather than logged away: it means the knowledge base has a gap, and that is
     #: something an operator can actually fix.
     placeholder: str = ""
+    #: The model said an appointment existed when the database says it does not. Replaced before
+    #: the caller heard it, and recorded, because it is the single most damaging thing an agent
+    #: can say and an operator should be able to count them.
+    false_booking: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -164,7 +168,7 @@ class TurnRecord:
             "tools": self.tools, "redacted": self.redacted, "refused": self.refused,
             "grounding": self.grounding.as_dict(),
             "interrupted": self.interrupted, "heard": self.heard,
-            "placeholder": self.placeholder,
+            "placeholder": self.placeholder, "false_booking": self.false_booking,
         }
 
 
@@ -326,6 +330,34 @@ class Conversation:
         # for a surname and "abc iphone com" for an email address -- so the agent must not spend
         # turns collecting them badly. It is also the difference between an agent that sounds
         # like a receptionist and one that sounds like a form being read aloud.
+        # THE CALLER HAS AGREED A TIME AND SOMETHING IS STILL MISSING.
+        #
+        # This case had no instruction at all, and the result was a call that went eleven turns,
+        # settled on a time, and booked nothing -- because the agent had been told never to ask
+        # for an email and was never told to ask for anything else instead. It just carried on
+        # talking. The caller had no idea the booking was blocked, or on what.
+        #
+        # The agent must not ask them to SAY an address -- recognition turns one into "abc iphone
+        # com". It can perfectly well ask them to fill the form in, and name what is outstanding.
+        #
+        # IT REPLACES THE NOTE RATHER THAN BEING ADDED TO IT. Appended, it sat directly beneath
+        # "say the time back and ask them to confirm it, ask for nothing else" -- and a 1.5B model
+        # handed two instructions follows the more emphatic one. It said "Great, we'll schedule
+        # you for tomorrow at ten thirty" to a caller whose booking was blocked on two fields.
+        # Everything above this line is about agreeing a time, and that is no longer the job.
+        outstanding = self._outstanding()
+        if self.memory.proposed_slot and outstanding:
+            return (
+                f"{self.memory.proposed_slot} is free, and the appointment CANNOT be booked "
+                f"until the caller types {outstanding} into the form on screen.\n"
+                f"Say BOTH, warmly, in two short sentences: say that time back to them, then "
+                f"name what is still needed and ask them to fill it in on screen. Saying only "
+                f"the second half ignores what they just asked for; saying only the first "
+                f"leaves them waiting for a booking that is not coming.\n"
+                f"Do NOT ask them to say those details out loud. Do NOT say the appointment is "
+                f"booked or scheduled — it is not, yet."
+            )
+
         # WHAT NOT TO ASK FOR OUT LOUD, derived from the schema rather than hardcoded. A field
         # the operator marked `spoken_ok` is one the agent may ask about; everything else is
         # typed, because recognition mangles exactly the values that have to be exact.
@@ -466,6 +498,17 @@ class Conversation:
             log.warning("placeholder %r in reply on %s", placeholder, self.call_id)
             reply = _NO_ANSWER
 
+        # A CLAIM THAT AN APPOINTMENT EXISTS IS CHECKED AGAINST THE DATABASE. There is a
+        # reference or there is not, and if there is not then whatever the model just wrote is
+        # false -- however reasonable it sounded. Replaced with what is actually true, including
+        # the reason, because "no" without a reason is its own kind of unhelpful.
+        false_booking = ""
+        if not self.memory.booked_reference:
+            false_booking = claims_a_booking(reply)
+            if false_booking:
+                log.warning("false booking claim %r on %s", false_booking, self.call_id)
+                reply = self._why_not_booked()
+
         timing.mark("speak")
 
         # Check the reply's numbers against the passages the model was actually given -- not
@@ -552,13 +595,51 @@ class Conversation:
             node=node.id if node else "", moved_to=moved_to,
             citations=[_citation(h) for h in hits], tools=tool_records,
             redacted=removed, refused=refused, grounding=grounding,
-            placeholder=placeholder,
+            placeholder=placeholder, false_booking=false_booking,
         )
         self.turns.append(record)
         yield {
             "type": "done", **record.as_dict(), "ended": self.ended,
             "memory": self.memory.as_dict(), "booked": booked,
         }
+
+    def _why_not_booked(self) -> str:
+        """What to say instead of claiming an appointment that does not exist.
+
+        Names the actual obstacle. "I cannot book that" on its own leaves the caller with nothing
+        to do about it, and the obstacle is nearly always something they can fix in ten seconds.
+        """
+        outstanding = self._outstanding()
+        if outstanding and self.memory.proposed_slot:
+            return (
+                f"I have not booked that yet — I still need your {outstanding} on screen, "
+                f"and then {self.memory.proposed_slot} is yours."
+            )
+        if outstanding:
+            return f"Before I can book anything I need your {outstanding} on the screen."
+        if self.memory.proposed_slot and not self.memory.slot_confirmed:
+            return f"Shall I book {self.memory.proposed_slot} for you?"
+        return "I have not been able to book that one. Shall we try another time?"
+
+    def _outstanding(self) -> str:
+        """What still stands between this call and a booking, in the operator's own words.
+
+        Two kinds, and the caller cannot tell them apart so neither does this: a field with no
+        value at all, and one the agent only THINKS it heard. Both block a booking, and both are
+        fixed the same way -- by typing it.
+        """
+        labels = {f.key: f.label.lower() for f in self.memory.fields}
+        wanted = [labels.get(k, k) for k in self.memory.missing]
+        wanted += [
+            f"{labels.get(k, k)} (to check what was heard)"
+            for k in self.memory.unconfirmed
+            if k not in self.memory.missing
+        ]
+        if not wanted:
+            return ""
+        if len(wanted) == 1:
+            return wanted[0]
+        return ", ".join(wanted[:-1]) + " and " + wanted[-1]
 
     def _slot_the_agent_offered(self, reply: str) -> str:
         """The time the agent just named, if it is one it was actually given.
@@ -853,6 +934,37 @@ _PLACEHOLDER = re.compile(
     r"|\bTBD\b|\bTBC\b|\bXXX+\b|\bN/?A\b",           # TBD, XXX, N/A
     re.IGNORECASE,
 )
+
+
+#: Ways of saying "that is done" that a caller would hang up on.
+_CLAIMS_BOOKED = re.compile(
+    r"\b(?:"
+    r"(?:appointment|booking|slot|reservation)s?\s+(?:is|are|has been|have been|'s)"
+    r"\s+(?:now\s+)?(?:booked|scheduled|confirmed|set|reserved|arranged)"
+    r"|(?:i|we)(?:'ve|\s+have|'ll|\s+will)?\s+(?:now\s+)?"
+    r"(?:booked|scheduled|reserved|confirmed|arranged|put\s+you\s+(?:in|down))"
+    r"|you(?:'re|\s+are)?\s+(?:all\s+)?(?:booked|set)"
+    r"|(?:booked|scheduled)\s+(?:you\s+)?(?:in|for)"
+    r"|see\s+you\s+(?:then|on|at|tomorrow)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def claims_a_booking(reply: str) -> str:
+    """The phrase in which the agent says an appointment exists, or "".
+
+    THE WORST THING THIS SYSTEM CAN DO. Not failing to book -- claiming to have booked. A caller
+    told "your appointment has been scheduled for Tuesday at ten thirty" hangs up, puts it in
+    their diary, and finds out on Tuesday. Nothing else in the product recovers from that.
+
+    It happened on a real call: the slot was genuinely taken, the details were never typed, the
+    booking correctly did not happen, and the agent said it had. The model is not being malicious
+    -- it is completing a conversation that sounds finished. Which is exactly why this is checked
+    against the database rather than left to the prompt.
+    """
+    match = _CLAIMS_BOOKED.search(reply)
+    return match.group(0) if match else ""
 
 
 def find_placeholder(reply: str) -> str:

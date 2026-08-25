@@ -469,8 +469,42 @@ class TestWhatTheModelIsTold:
         convo.memory.observe("how about ten")
         note = convo._scheduling_note()
 
-        assert "IS free" in note
+        assert "is free" in note.lower()
         assert convo.memory.proposed_slot == "tomorrow at ten in the morning"
+
+    def test_once_a_time_is_agreed_the_note_is_only_about_the_missing_details(self):
+        """A REAL CALL RAN ELEVEN TURNS, AGREED A TIME AND BOOKED NOTHING. The agent had been
+        told never to ask for an email and never told to ask for anything else instead, so it
+        said "Great, we'll schedule you for tomorrow at ten thirty" to a caller whose booking was
+        blocked on two fields.
+
+        The instruction replaces the note rather than being appended to it: appended, it sat
+        directly under "ask them to confirm it, ask for nothing else", and a 1.5B model handed
+        two instructions follows the more emphatic one."""
+        convo, _ = self.conversation()
+        convo.memory.observe("I need a cleaning, can I come tomorrow at ten")
+        convo._scheduling_note()                       # puts the slot on the table
+        note = convo._scheduling_note()
+
+        assert "CANNOT be booked" in note
+        assert "full name" in note and "email" in note
+        # And nothing left over that tells it to do something else instead.
+        assert "Ask for nothing else" not in note
+        assert "YOUR ONLY JOB RIGHT NOW is to agree a time" not in note
+        assert "Do NOT say the appointment is booked" in note
+
+    def test_it_says_nothing_about_details_once_they_are_all_in(self):
+        """The other direction. A note that nags about a completed form is how an agent ends up
+        asking for something it already has."""
+        convo, _ = self.conversation()
+        convo.memory.observe("I need a cleaning, can I come tomorrow at ten")
+        for field, value in [("name", "Sam Hassan"), ("phone", "(212) 555-9876"),
+                             ("email", "sam@example.com")]:
+            convo.memory.tell(field, value)
+        note = convo._scheduling_note()
+
+        assert "CANNOT be booked" not in note
+        assert "IS free" in note
 
     def test_only_real_slots_are_ever_offered(self):
         """The list in the prompt is the list the calendar returned, filtered to nothing else.

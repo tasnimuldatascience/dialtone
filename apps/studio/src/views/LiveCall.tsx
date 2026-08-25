@@ -416,7 +416,7 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
           }
           // Every chunk re-arms the mute and adds its words to the echo memory. Doing this only
           // on the first chunk left the guard expiring midway through a long reply.
-          audio.current?.markSpeaking(String(event.text ?? ''))
+          audio.current?.markSpeaking()
           void audio.current?.push(String(event.wav), String(event.text ?? ''))
         }
         if (type === 'audio_failed') {
@@ -1062,6 +1062,13 @@ function DetailsForm({
   const dirty = fields.some(
     (f) => (form[f.key] ?? '').trim() && (form[f.key] ?? '').trim() !== memory?.facts[f.key]?.value,
   )
+  // Required and absent, or present but only ever HEARD -- both stop a booking, and a caller
+  // cannot tell them apart, so neither does this.
+  const blocking = fields.filter(
+    (f) => f.required && (
+      !memory?.facts[f.key]?.value || memory.facts[f.key]?.confirmed === false
+    ),
+  )
   const heardNotTyped = (key: string) =>
     Boolean(memory?.facts[key]?.value) && memory?.facts[key]?.confirmed === false
 
@@ -1076,6 +1083,16 @@ function DetailsForm({
           are the values the booking actually uses.
         </p>
 
+        {/* WHAT IS BLOCKING THE BOOKING, said where the caller is looking. A real call went
+            eleven turns, settled on a time, and booked nothing -- the system knew the email was
+            missing the whole way through and never put that anywhere the caller would see it. */}
+        {blocking.length > 0 && memory?.proposed_slot && (
+          <div className="note" data-t="warn" style={{ marginBottom: 13 }}>
+            <b>Needed before this can be booked:</b>{' '}
+            {blocking.map((f) => f.label.toLowerCase()).join(', ')}.
+          </div>
+        )}
+
         {fields.map((field) => {
           const problem = problems[field.key]
           const warning = warnings[field.key]
@@ -1084,6 +1101,9 @@ function DetailsForm({
             <label key={field.key} className="field">
               <span className="field-l">
                 {field.label}
+                {blocking.includes(field) && memory?.proposed_slot && (
+                  <em className="field-need">needed</em>
+                )}
                 {!field.required && <em className="field-opt">optional</em>}
                 {memory?.facts[field.key]?.confirmed && !problem && (
                   <i className="tick"><Icon name="check" size={10} /></i>
