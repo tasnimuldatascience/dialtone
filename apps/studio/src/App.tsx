@@ -161,6 +161,7 @@ export function App() {
 
   const agent = agents.find((a) => a.id === agentId) ?? null
   const state = health ? health.status : 'offline'
+  const capacity = health?.capacity
 
   const shared = {
     agent,
@@ -172,6 +173,7 @@ export function App() {
     navigate: setRoute,
     ready: health?.status === 'ready',
     offline: state === 'offline',
+    capacity: capacity ?? null,
   }
 
   return (
@@ -208,6 +210,21 @@ export function App() {
         </nav>
 
         <div className="side-foot">
+          {capacity && capacity.live > 0 && (
+            <div
+              className="status-pill"
+              style={{ marginBottom: 8 }}
+              title={`This machine carries ${capacity.limit} calls at once, measured on ${capacity.measured_on}. Past that a caller is refused rather than left waiting.`}
+            >
+              <i className="cap">
+                {Array.from({ length: capacity.limit }, (_, i) => (
+                  <b key={i} data-on={i < capacity.live} />
+                ))}
+              </i>
+              {capacity.live} of {capacity.limit} lines
+            </div>
+          )}
+
           <div className="status-pill" title={health?.model ?? ''}>
             <i className="dot" data-state={state} />
             <span>
@@ -313,4 +330,6 @@ export interface ViewProps {
   ready: boolean
   /** The gateway is not answering. Views that load data should say so rather than spin. */
   offline: boolean
+  /** How many calls this machine will carry, and how many are running. */
+  capacity: { live: number; limit: number; available: number; measured_on: string } | null
 }

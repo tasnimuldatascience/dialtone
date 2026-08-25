@@ -4,7 +4,7 @@
 
 **An AI phone agent that knows when you have finished talking.**
 
-[![tests](https://img.shields.io/badge/tests-450%20passing-4ade80?style=flat-square)](#run-it)
+[![tests](https://img.shields.io/badge/tests-603%20passing-4ade80?style=flat-square)](#run-it)
 [![python](https://img.shields.io/badge/python-3.12%2B-35e0d0?style=flat-square)](#run-it)
 [![typescript](https://img.shields.io/badge/typescript-5.6-35e0d0?style=flat-square)](#run-it)
 [![license](https://img.shields.io/badge/license-MIT-8ea0b5?style=flat-square)](LICENSE)
@@ -288,7 +288,7 @@ You need Python 3.12+ and Node 20+. No API keys. No GPU. Nothing paid.
 cd services/gateway
 pip install -e ".[serve,dev]"
 
-pytest                    # 354 tests
+pytest                    # 495 tests
 dialtone bench ablate     # see the results table
 dialtone serve            # starts on http://127.0.0.1:8071
 
@@ -395,6 +395,50 @@ And when it answers anyway, two things catch it: every number is checked against
 was given, and any reply containing a template placeholder is replaced before the caller hears it.
 That second one exists because an agent asked where it was once said *"Northgate Dental is located
 at [insert location]"* — a gap in the knowledge base, rendered as the shape of an answer.
+
+---
+
+## How many callers at once
+
+Three, on a laptop. That number is measured, not chosen, and the measuring is the interesting
+part.
+
+| callers at once | first token | whole turn | vs one caller |
+|---:|---:|---:|---:|
+| 1 | 1114ms | 3091ms | 1.0× |
+| 2 | 1054ms | 2699ms | 0.9× |
+| 4 | 3427ms | 5929ms | 1.9× |
+| 8 | **5287ms** | 8100ms | 2.6× |
+
+**Nothing failed at eight**, and that is exactly the problem. The system did not refuse anybody;
+it degraded everybody. Every caller waited more than five seconds for the first word — from a
+project whose entire argument is about the first few hundred milliseconds.
+
+A voice agent that answers and then leaves you in silence is worse than one that never answered.
+The caller is already committed. So there is a limit, it is enforced at the door, and the call
+that cannot be served is refused with a reason:
+
+```console
+$ curl -s -X POST localhost:8071/api/calls -d '{"agent_id":"..."}' -w ' %{http_code}\n'
+{"detail":"3 calls already in progress, which is this machine's limit.
+           Raise DIALTONE_MAX_CALLS if the hardware can take it."} 503
+```
+
+with `Retry-After: 30`, a line-usage indicator in the sidebar, and "all lines are busy" in the
+studio rather than a stack trace. `DIALTONE_MAX_CALLS` moves it — the number belongs to the
+hardware, not to the code, and a GPU or a smaller model moves it without changing anything else.
+
+**Where the ceiling actually is.** One process, one model, one SQLite file. SQLite in WAL mode was
+never the bottleneck — nothing failed, at any level. The scarce resource is generation, and
+everything else in a turn (redaction, retrieval, the calendar, the database) is cheap by
+comparison. Getting past a handful of concurrent callers is not a matter of tuning this code: it
+needs continuous batching in front of the model — vLLM or equivalent — and a model server scaled
+separately from the gateway. That is a real piece of work, it is not done here, and pretending
+otherwise by simply not having a limit is how you end up with eight people listening to silence.
+
+For context: Retell ships 20 concurrent free, Vapi 10 at $10/line/month, Bland 10 to 100 by plan,
+ElevenLabs 4 to 40. All four publish the number. Until now this published nothing, which is
+indistinguishable from having no limit right up until the day it is hit.
 
 ---
 
@@ -707,7 +751,7 @@ agents feel like a walkie-talkie.
 
 ## Tests
 
-354 in the gateway, 96 in the browser, and four scripts that drive the whole thing for real.
+495 in the gateway, 108 in the browser, and four scripts that drive the whole thing for real.
 Each is named after the problem it prevents, not the function it calls:
 
 ```
@@ -721,8 +765,8 @@ test_a_time_that_does_not_exist_is_refused_even_on_a_free_day
 ```
 
 ```bash
-cd services/gateway && pytest          # 354
-cd apps/studio      && npm test        # 96
+cd services/gateway && pytest          # 495
+cd apps/studio      && npm test        # 108
 npm run smoke                          # every screen, in Chromium, with a fake microphone
 npm run scenarios                      # gateway down, socket dropped, 1024px, keyboard only
 python scripts/booking-e2e.py          # a real call, then a look in the database
@@ -747,6 +791,10 @@ Some exist because the code was wrong first:
 | One spoken sentence became four replies | Two clocks disagreed and nothing tracked what had already been sent |
 | `sam@example.com` set the appointment reason to "check-up" | "example" contains "exam", and the match was on substrings |
 | The caller was told a free morning was full | The prompt said so whenever they had not yet named an hour — which is most of the time |
+| **The agent said an appointment was booked when it was not** | The worst thing it can do: the caller hangs up satisfied and finds out on the day. Claims are checked against the database now |
+| The agent answered its own sentences | The memory of having spoken expired while the audio was still playing — timed from when it was queued, not when it was heard |
+| The whole weight system never rendered | `Inter` was declared and never loaded, so ten weights fell back to two |
+| It never asked for the missing details | It was told not to ask for an email out loud, and never told to ask for anything else instead |
 | "One more thing" was parsed as one o'clock | It silently moved an appointment already agreed for nine thirty |
 | The agent read "[insert location]" out loud | Nothing in the knowledge base gave the practice an address, and a model fills in a form |
 | The streaming voice repeated the last few words | It tracked a position in the written reply and used it to slice the spoken one |

@@ -38,7 +38,7 @@ from ..brain.contact import check as contact_check
 from ..compliance.redact import redact
 from ..eval.endpointing import CORPUS, ablate, run, sweep
 from ..flow.graph import GuardrailError
-from ..platform import Platform, _flow_from_dict, _flow_to_dict
+from ..platform import AtCapacity, Platform, _flow_from_dict, _flow_to_dict
 from ..scheduling.calendar import as_dict as as_slot_dict
 from ..scheduling.calendar import available
 from ..sim.call import CANNED_CALLS, replay
@@ -102,6 +102,9 @@ def health() -> dict[str, Any]:
         "model": getattr(p.brain, "model_name", "scripted"),
         "warm_seconds": round(p.warm_seconds, 1),
         "live_calls": len(p.calls),
+        # Published, the way every commercial platform publishes theirs. A limit nobody can see
+        # is indistinguishable from no limit until the day it is hit.
+        "capacity": p.capacity,
         "voice": {
             "engine": "kokoro-82m" if p.voice.ready else "browser",
             "ready": p.voice.ready,
@@ -374,7 +377,12 @@ def start_call(body: StartCallIn) -> dict[str, Any]:
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
-    return {"call_id": call_id, "greeting": greeting}
+    except AtCapacity as exc:
+        # 503 with a Retry-After, not a 500 and not a call that connects into silence. A voice
+        # agent that answers and then makes you wait five seconds for the first word is worse
+        # than one that never answered: the caller is already committed. See Platform.capacity.
+        raise HTTPException(503, str(exc), headers={"Retry-After": "30"}) from exc
+    return {"call_id": call_id, "greeting": greeting, "capacity": p.capacity}
 
 
 @app.post("/api/calls/{call_id}/end")

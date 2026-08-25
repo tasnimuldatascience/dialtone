@@ -65,6 +65,8 @@ Not ahead, but genuinely implemented rather than stubbed.
 | **Simulation testing** | ✅ | Scripted calls, replayable, deterministic. All four have deeper versions — Bland's especially (flakiness detection, auto-fix loops). |
 | **Idempotency on money paths** | ✅ | Plus a `UNIQUE` constraint on the appointment slot, so two callers cannot take the same one. |
 | **Typed intake with validation** | ✅ | Operator-declared fields, nine kinds, validated before storage. Comparable to the structured-extraction features, though those extract from the transcript rather than from a form. |
+| **A published concurrency limit** | ✅ 3 | All four publish one (Retell 20, Vapi 10, Bland 10–100, ElevenLabs 4–40). dialtone's is far lower and it is *measured* — one 1.5B model on a CPU. What it does have that they do not is the table the number came from. |
+| **Refusing rather than degrading** | ✅ | 503 with a reason and a `Retry-After`, because a caller who is already connected and waiting five seconds is worse off than one who was told to ring back. |
 
 ---
 
@@ -92,7 +94,7 @@ account and a phone bill.
 |---|---|
 | Post-call webhooks with HMAC signatures | all four |
 | Outbound campaigns / batch calling from CSV | all four |
-| Concurrency limits, burst, queueing | all four, with published numbers |
+| Burst capacity and queueing | all four |
 | Agent versioning, drafts, rollback | all four (ElevenLabs has branch/merge/**rebase**) |
 | A/B testing on live traffic | Retell, ElevenLabs |
 | Alerting on metric thresholds | Retell (14 metrics), Vapi, Bland |
@@ -103,6 +105,14 @@ account and a phone bill.
 MCP is worth calling out: every one of the four now ships both an outbound MCP client and a
 hosted MCP server for managing the account. dialtone has an internal tool registry and no MCP at
 all.
+
+### Scale past a handful of callers
+
+Measured at 1 / 2 / 4 / 8 concurrent, turn latency goes 3091 / 2699 / 5929 / 8100ms. The scarce
+resource is generation; everything else in a turn is cheap. Getting past a handful needs
+continuous batching in front of the model (vLLM or equivalent) and a model server scaled
+independently of the gateway. Not done here, and named rather than hidden — the limit is enforced
+so the failure is a refusal instead of eight people listening to silence.
 
 ### Model and voice breadth
 

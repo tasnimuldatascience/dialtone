@@ -10,6 +10,8 @@ export interface Health {
   model: string
   warm_seconds: number
   live_calls: number
+  /** How many calls this machine will carry at once, and how many are running. */
+  capacity?: { live: number; limit: number; available: number; measured_on: string }
   version: string
   voice?: { engine: 'kokoro-82m' | 'browser'; ready: boolean; available: boolean }
 }

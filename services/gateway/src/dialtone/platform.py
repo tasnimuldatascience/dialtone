@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -40,6 +41,19 @@ from .speech.tts import Synthesizer
 from .store.db import Store
 
 log = logging.getLogger("dialtone.platform")
+
+
+class AtCapacity(RuntimeError):
+    """Refused because serving this call would degrade the ones already running."""
+
+
+#: How many calls this process will carry at once.
+#:
+#: Three, because that is where the measurements put it: two concurrent callers cost nothing,
+#: four doubles the turn time, eight makes the first word arrive after five seconds. The number
+#: belongs to the hardware rather than to the code, so it is an environment variable -- a GPU or
+#: a smaller model moves it, and nothing else has to change.
+DEFAULT_MAX_CALLS = 3
 
 
 @dataclass(slots=True)
@@ -79,7 +93,8 @@ class StoreBooking:
 class Platform:
     """Everything the API serves, and everything that outlives a request."""
 
-    def __init__(self, db_path: str | Path = "dialtone.db", *, use_local_model: bool = True):
+    def __init__(self, db_path: str | Path = "dialtone.db", *, use_local_model: bool = True,
+                 max_calls: int | None = None):
         self.store = Store(db_path)
         self.use_local_model = use_local_model
         self.brain: Brain = (
@@ -92,6 +107,9 @@ class Platform:
         #: separate service: it is 330MB and CPU-bound, so it costs nothing the GPU wanted.
         self.voice = Synthesizer()
         self.calls: dict[str, LiveCall] = {}
+        # The hardware's number, not the code's. See `capacity` for the measurements it comes
+        # from and why refusing beats degrading.
+        self.max_calls = max_calls or int(os.environ.get("DIALTONE_MAX_CALLS", DEFAULT_MAX_CALLS))
         self.status = "starting"
         self.warm_seconds = 0.0
         self._warm_lock = asyncio.Lock()
@@ -161,10 +179,48 @@ class Platform:
             log.warning("agent %s has an unloadable flow: %s", agent["id"], exc)
             return None
 
+    # -- capacity ----------------------------------------------------------
+    @property
+    def capacity(self) -> dict[str, Any]:
+        """How many calls are running, and how many this machine will take.
+
+        MEASURED, NOT GUESSED. On the reference laptop -- Qwen2.5-1.5B on CPU -- concurrent
+        turns cost:
+
+            1 caller    first token 1114ms   whole turn 3091ms
+            2 callers   first token 1054ms   whole turn 2699ms
+            4 callers   first token 3427ms   whole turn 5929ms
+            8 callers   first token 5287ms   whole turn 8100ms
+
+        Nothing failed at eight. That is exactly the problem: the system does not refuse, it
+        degrades, and every caller waits five seconds for the first word. A voice agent that
+        answers and then leaves you in silence is worse than one that never answered -- the
+        caller is already committed, and the whole argument of this project is about the first
+        few hundred milliseconds.
+
+        So there is a limit, it is enforced at the door, and a call that cannot be served is
+        refused with a reason rather than accepted and starved.
+        """
+        return {
+            "live": len(self.calls),
+            "limit": self.max_calls,
+            "available": max(0, self.max_calls - len(self.calls)),
+            "measured_on": "Qwen2.5-1.5B, CPU",
+        }
+
     # -- calls -------------------------------------------------------------
     def start_call(self, agent_id: str, *, from_number: str = "",
                    channel: str = "text") -> tuple[str, str]:
-        """Begin a call. Returns (call_id, greeting)."""
+        """Begin a call. Returns (call_id, greeting).
+
+        Raises `AtCapacity` when the machine is already carrying as many as it can serve well.
+        """
+        if len(self.calls) >= self.max_calls:
+            raise AtCapacity(
+                f"{len(self.calls)} calls already in progress, which is this machine's limit. "
+                f"Raise DIALTONE_MAX_CALLS if the hardware can take it."
+            )
+
         agent = self.store.get_agent(agent_id)
         if agent is None:
             raise KeyError(f"no agent {agent_id!r}")

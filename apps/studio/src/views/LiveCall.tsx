@@ -461,7 +461,18 @@ export function LiveCall({ agent, agents, agentId, setAgentId, ready }: ViewProp
         )
       }
     } catch (error) {
-      setLines([{ who: 'agent', text: `Could not start the call: ${String(error)}` }])
+      // A refusal is not a failure and must not read as one. The commonest reason is capacity,
+      // and "all lines are busy" is a thing every caller already understands -- where
+      // `Error: 503 "..."` is a thing nobody does.
+      const message = String(error)
+      const busy = /calls already in progress|capacity/i.test(message)
+      setLines([{
+        who: 'agent',
+        text: busy
+          ? 'All lines are busy. This machine carries a fixed number of calls at once so that '
+            + 'the ones it does take stay fast — try again in a moment.'
+          : `Could not start the call: ${message}`,
+      }])
       setPhase('idle')
     }
   }, [agentId, agent, mode, voiceOn, startMic])

@@ -628,3 +628,11 @@ code { font-family: var(--mono); font-size: 13px; background: var(--bg-0); borde
   text-transform: uppercase; color: var(--cost);
   padding: 1px 6px; border-radius: 99px; background: #1c1508; border: 1px solid #46381c;
 }
+
+
+/* ── lines in use ──────────────────────────────────────────────────────────
+ * A row of pips rather than a number on its own: "2 of 3" tells you the state, the pips tell
+ * you how close to the edge you are without having to do the subtraction. */
+.cap { display: inline-flex; gap: 3px; align-items: center; flex-shrink: 0; }
+.cap b { width: 5px; height: 12px; border-radius: 2px; background: var(--line-2); display: block; }
+.cap b[data-on='true'] { background: var(--accent); }
