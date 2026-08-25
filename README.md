@@ -892,6 +892,7 @@ output is not committed:
 python scripts/narrate.py              # speak the script, and measure every line
 node   scripts/demo-video.mjs          # drive the real product, paced to those measurements
 python scripts/soundtrack.py           # lay the audio in at the recorded offsets, encode MP4
+python scripts/captions.py             # subtitles, from those same offsets
 ```
 
 `long-call.py` earns its place. Every structural check in it passed the first time — no crash, no
