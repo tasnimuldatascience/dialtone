@@ -99,8 +99,14 @@ class CallMemory:
     #: morning" and "how about ten" are one request delivered in two parts, and treating the
     #: second as a fresh one is what made the agent ask when tomorrow morning starts.
     when: When = field(default_factory=When)
-    #: The slot currently on the table, once one has been offered and understood.
+    #: The slot currently on the table, once one has been offered and understood. The spoken
+    #: form is for the prompt and the screen; the ISO form is what gets booked.
     proposed_slot: str = ""
+    #: THE SLOT ITSELF, not a re-derivation of it. Booking used to work back from `when`, which
+    #: holds what the CALLER said -- and when the agent proposed the time ("tomorrow morning at
+    #: eight thirty") the caller had only said "tomorrow morning". No hour, no match, no booking,
+    #: with everything else in place and `ready_to_book` reporting True.
+    proposed_iso: str = ""
     #: Whether the caller has actually agreed to it. Kept as state rather than read off the
     #: latest turn, because agreement and the details often arrive in either order -- they say
     #: "yes, that works" and then type their phone number, or type it first and then say yes.
@@ -218,6 +224,7 @@ class CallMemory:
                 "part": self.when.part,
             },
             "proposed_slot": self.proposed_slot,
+            "proposed_iso": self.proposed_iso,
             "slot_confirmed": self.slot_confirmed,
             "booked_reference": self.booked_reference,
             "missing": self.missing,

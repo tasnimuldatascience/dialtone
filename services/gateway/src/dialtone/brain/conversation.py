@@ -37,13 +37,15 @@ from datetime import time as clock_time
 from typing import Any, Protocol
 
 from ..compliance.redact import redact
-from ..flow.graph import Flow, FlowRunner, GuardrailError, NodeKind
+from ..flow.graph import Flow, FlowRunner, GuardrailError, Node, NodeKind
 from ..scheduling.calendar import (
     EVENING_FROM,
     Slot,
+    When,
     available,
     match_slot,
     offer_text,
+    parse_when,
     suggest,
 )
 from ..tools.registry import ToolCall, ToolRegistry, ToolTrace
@@ -191,6 +193,9 @@ class Conversation:
         #: broken booking.
         self.booking = booking
         self.today = today or date.today()
+        #: The slots put in front of the model on the current turn. Set while the prompt is
+        #: built and read after the reply, to check whether the agent offered one of them.
+        self._offered: list[Slot] = []
         self.memory = CallMemory(today=self.today)
 
     # -- scheduling ---------------------------------------------------------
@@ -224,12 +229,26 @@ class Conversation:
         if self.booking is None:
             return ""
 
+        # JUST BOOKED. This is the whole of the agent's job for this turn, so it goes first and
+        # alone -- buried in a list of availability the model read past it and asked the caller
+        # to confirm a time it had already reserved for them.
+        if self.memory.booked_reference:
+            return (
+                f"THE APPOINTMENT IS NOW BOOKED for {self.memory.proposed_slot}. The reference "
+                f"is {self.memory.booked_reference}.\n"
+                f"Say three things and nothing else: that it is booked, the day and time, and "
+                f"the reference letter by letter. Ask no questions. Offer nothing further."
+            )
+
         slots = self.open_slots()
         if not slots:
             return "Nothing is free in the next two weeks. Offer to take a number instead."
 
         picks = suggest(self.memory.when, slots)
         exact = match_slot(self.memory.when, slots)
+        # Kept for the check after the reply: whatever the agent ends up saying, it can only be
+        # taken as an offer if it is one of these.
+        self._offered = picks
 
         # Whether the offer actually answers what they asked for. `suggest` deliberately falls
         # back to other days rather than returning nothing -- a caller who wanted Tuesday will
@@ -275,6 +294,7 @@ class Conversation:
 
         if exact:
             self.memory.proposed_slot = exact.spoken(self.today)
+            self.memory.proposed_iso = exact.iso
             lines.append(
                 f"The caller has asked for {exact.spoken(self.today)} and it IS free. Say that "
                 f"time back to them in one sentence and ask them to confirm it. Ask for nothing "
@@ -363,6 +383,23 @@ class Conversation:
         # Learn from the turn BEFORE the prompt is built, so anything just said reaches
         # this reply rather than only the one after it.
         learned = self.memory.observe(safe_text)
+
+        # ── the caller's answer to an offer, read BEFORE the reply is written ──
+        # A slot offered on the previous turn plus a "yes" on this one is a booking, and it has
+        # to happen here rather than after generation. It used to run at the end of the turn:
+        # the appointment was made, correctly, and the agent -- which had already written its
+        # reply -- said "could you please confirm your preferred time?" to a caller who had just
+        # confirmed it. The reference only appeared a turn later.
+        #
+        # Now the booking is in the prompt before the model writes, so it can say what happened.
+        early_booked = None
+        if self.memory.proposed_slot and not self.memory.booked_reference and _confirms(safe_text):
+            self.memory.slot_confirmed = True
+            early_booked = self.book_if_ready()
+            if early_booked:
+                yield {"type": "booked", **early_booked}
+            elif self.memory.ready_to_book:
+                yield {"type": "booking_failed", "reason": "that slot was just taken"}
         if learned:
             yield {"type": "learned", "fields": learned, "memory": self.memory.as_dict()}
 
@@ -465,6 +502,14 @@ class Conversation:
                 log.info("refused transition on %s: %s", self.call_id, refused)
                 yield {"type": "refused", "reason": refused}
 
+        if not moved_to:
+            # The model said nothing about moving on. If the step is finished, move anyway --
+            # see _advance for why this is not the model's decision to make.
+            before = self.state.node_id if self.state else ""
+            moved_to = self._advance(tuple(t["name"] for t in tool_records))
+            if moved_to:
+                yield {"type": "moved", "from": before, "to": moved_to}
+
         if self.state and (self.state.ended or self.state.transferred):
             self.ended = True
 
@@ -472,14 +517,19 @@ class Conversation:
         # Decided HERE, not by the model. Confirming an appointment is the one
         # irreversible act on the call, so a model that hallucinates a Thursday at nine
         # cannot bring one into existence.
-        if self.memory.proposed_slot and _confirms(safe_text):
-            self.memory.slot_confirmed = True
+        # What the agent just offered, so the caller's answer NEXT turn has something to attach
+        # to. The confirmation itself was handled before generation -- see above.
+        if not self.memory.proposed_slot:
+            self.memory.proposed_slot = self._slot_the_agent_offered(reply)
 
-        booked = self.book_if_ready()
-        if booked:
-            yield {"type": "booked", **booked}
-        elif self.memory.ready_to_book and not self.memory.booked_reference:
-            yield {"type": "booking_failed", "reason": "that slot was just taken"}
+        booked = early_booked
+        if booked is None and self.memory.proposed_slot and _confirms(safe_text):
+            # The agent offered a slot and the caller had ALREADY agreed in the same breath
+            # ("yes, tomorrow morning is fine"). Rare, but it is a booking.
+            self.memory.slot_confirmed = True
+            booked = self.book_if_ready()
+            if booked:
+                yield {"type": "booked", **booked}
 
         self.history.append(Turn("assistant", reply))
         record = TurnRecord(
@@ -494,6 +544,139 @@ class Conversation:
             "type": "done", **record.as_dict(), "ended": self.ended,
             "memory": self.memory.as_dict(), "booked": booked,
         }
+
+    def _slot_the_agent_offered(self, reply: str) -> str:
+        """The time the agent just named, if it is one it was actually given.
+
+        THE OTHER HALF OF "THE MODEL PROPOSES, CODE DECIDES". Booking already refuses times the
+        model invents. But it was ALSO ignoring times the model proposed correctly:
+
+            caller:  can I come tomorrow morning?
+            agent:   Of course! Tomorrow morning at eight thirty would be perfect.
+            caller:  yes that works
+                     -> nothing booked; proposed_slot was still empty
+
+        `proposed_slot` was only ever set when the CALLER named a precise time. When the agent
+        made the offer and the caller simply agreed -- which is the ordinary shape of the
+        conversation, and the shape the prompt asks for -- there was no record of what had been
+        agreed to, so the confirmation had nothing to attach to.
+
+        The agent's own sentence is parsed and matched against the slots it was handed this
+        turn. It cannot conjure a time this way: a reply naming something that is not in that
+        list matches nothing and is ignored.
+        """
+        offered = getattr(self, "_offered", None)
+        if not offered:
+            return ""
+        heard = parse_when(reply, self.today)
+        if heard.hour is None:
+            return ""
+        # No day named in the reply means the day under discussion.
+        if heard.day is None:
+            heard = When(day=self.memory.when.day, hour=heard.hour,
+                         minute=heard.minute, part=heard.part)
+        slot = match_slot(heard, offered)
+        if slot is None:
+            return ""
+        self.memory.proposed_iso = slot.iso
+        return slot.spoken(self.today)
+
+    # -- moving through the flow -------------------------------------------
+    #: How a node's `collects` name maps onto what this call actually knows. The graph names
+    #: values in the operator's vocabulary; the call holds them in the agent's. Anything not
+    #: listed falls through to `state.collected`, which is what a custom flow with its own
+    #: field names will use.
+    _COLLECTS: dict[str, str] = {
+        "reason": "reason", "name": "name", "phone": "phone", "email": "email",
+    }
+
+    def _collected(self, key: str) -> str:
+        """The value this call has for a node's `collects` field, if any."""
+        if key in self._COLLECTS:
+            return self.memory.get(self._COLLECTS[key])
+        if key in ("preferred_day", "when", "day", "time", "slot"):
+            when = self.memory.when
+            if when.day or when.hour is not None or when.part:
+                return self.memory.proposed_slot or str(when.day or when.part or when.hour)
+            return ""
+        if key in ("confirmed", "confirmation"):
+            return "yes" if self.memory.slot_confirmed else ""
+        return str(self.state.collected.get(key, "")) if self.state else ""
+
+    def _node_satisfied(self, node: Node, ran: tuple[str, ...]) -> bool:
+        """Has this step done what it is there to do?
+
+        `ran` is the tools that fired on the turn being finished. It is passed in rather than
+        read from `self.turns`, because the record for this turn is appended AFTER the
+        transition is decided -- reading it there made every step advance one turn late, which
+        on a four-turn booking is the difference between reaching the booking node and not.
+        """
+        if node.kind is NodeKind.COLLECT:
+            return bool(node.collects) and bool(self._collected(node.collects))
+        if node.kind is NodeKind.TOOL:
+            # Done once its tool has run, or -- for the booking node -- once the thing the tool
+            # exists to produce actually exists.
+            if "book_appointment" in node.tools:
+                return bool(self.memory.booked_reference)
+            return any(name in node.tools for name in ran)
+        if node.kind is NodeKind.SPEAK:
+            # A reply has just been generated from it, so it has said its piece.
+            return True
+        return False                         # TRANSFER and END are terminal
+
+    def _advance(self, ran: tuple[str, ...] = ()) -> str:
+        """Move to the next step when the current one is finished. Returns the new node, or "".
+
+        WHY CODE DECIDES THIS. The graph was built to be driven by the model emitting `[[node_id]]`
+        at the end of a reply. It never did. A 1.5B model given a prompt that opens with "one or
+        two sentences, never use markdown, this is a phone call" does not then append a bracketed
+        token, and a trace of a real booking call showed every single turn still sitting on
+        `greet` with no tool ever called -- so `offer_slots` and `book` were unreachable and the
+        flow was decoration.
+
+        This is the same conclusion the booking already reached: the model proposes, code decides.
+        The graph is not weakened by it -- every move still goes through `FlowRunner.transition`,
+        so an edge the graph does not permit is still refused. What changes is who proposes.
+
+        A model-emitted marker is still honoured if one ever arrives; this only fires when the
+        current step is demonstrably complete and the model has said nothing.
+        """
+        if not (self.runner and self.state):
+            return ""
+
+        moved = ""
+        # SEVERAL STEPS AT ONCE, because a caller can answer several at once. "Hi, I'd like to
+        # book a cleaning tomorrow at ten thirty" satisfies the reason AND the timing in one
+        # sentence, and a flow that advances one node per turn would spend three more turns
+        # asking for things it already has.
+        #
+        # Bounded by the number of nodes: a graph with a cycle in it must not spin here.
+        for _ in range(len(self.runner.flow.nodes)):
+            if self.state.ended or self.state.transferred:
+                break
+            node = self.runner.node(self.state)
+            if not self._node_satisfied(node, ran):
+                break
+
+            # Hand the value to the GRAPH as well. `transition` refuses to leave a collect node
+            # whose value is missing from `state.collected` -- that guardrail is the point of the
+            # node, and it reads the graph's own store rather than the call's memory. Writing it
+            # here keeps the two in step wherever _advance is called from.
+            if node.kind is NodeKind.COLLECT and node.collects:
+                self.state.collected.setdefault(node.collects, self._collected(node.collects))
+
+            legal = self.runner.legal_transitions(self.state)
+            if not legal:
+                break
+
+            # The happy path first: graph authors put the ordinary continuation at the top, and
+            # the escape hatches -- handoff, retry, goodbye -- after it.
+            try:
+                self.runner.transition(self.state, legal[0].to)
+            except GuardrailError:                  # pragma: no cover -- legal_transitions gave it
+                break
+            moved = self.state.node_id
+        return moved
 
     def interrupted(self, heard: str) -> bool:
         """The caller talked over the agent. Keep only what they actually heard.
@@ -549,7 +732,11 @@ class Conversation:
         """Reserve the slot under discussion. Returns None if it went in the meantime."""
         if self.booking is None:
             return None
-        slot = match_slot(self.memory.when, self.open_slots())
+        # The slot that was actually agreed, not a re-derivation from what the caller said --
+        # see CallMemory.proposed_iso. Still checked against the live calendar, so a slot taken
+        # since it was offered fails here rather than double-booking.
+        free = {s.iso: s for s in self.open_slots()}
+        slot = free.get(self.memory.proposed_iso) or match_slot(self.memory.when, list(free.values()))
         if slot is None:
             return None
 
