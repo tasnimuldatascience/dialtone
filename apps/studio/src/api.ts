@@ -143,7 +143,11 @@ export interface CallTurn {
   grounding?: Grounding
 }
 
-export interface CallDetail extends CallRow { turns: CallTurn[] }
+export interface CallDetail extends CallRow {
+  turns: CallTurn[]
+  /** The appointment this call produced, if it produced one. The outcome, not the conversation. */
+  appointment: Appointment | null
+}
 
 export interface Campaign {
   id: string

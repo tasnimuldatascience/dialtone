@@ -394,8 +394,16 @@ class Store:
             turns = self._db.execute(
                 "SELECT * FROM turns WHERE call_id = ? ORDER BY ordinal", (call_id,)
             ).fetchall()
+            # THE OUTCOME, not just the conversation. A call record that shows what was said and
+            # not what was DONE makes an operator read the whole transcript to answer "did this
+            # one book?" -- which is the first question anyone asks of a call list.
+            booked = self._db.execute(
+                "SELECT * FROM appointments WHERE call_id = ? AND status = 'booked' "
+                "ORDER BY created_at LIMIT 1", (call_id,)
+            ).fetchone()
         call = dict(row)
         call["turns"] = [_turn(t) for t in turns]
+        call["appointment"] = dict(booked) if booked else None
         return call
 
     def list_calls(self, *, agent_id: str | None = None, limit: int = 100,

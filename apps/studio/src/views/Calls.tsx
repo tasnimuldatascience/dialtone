@@ -105,9 +105,12 @@ function Detail({ call, onBack }: { call: CallDetail; onBack: () => void }) {
         <h1>{call.summary || 'Call'}</h1>
         <p>
           {call.agent_name} · {call.started_at.replace('T', ' ').slice(0, 16)} ·{' '}
-          {(call.duration_ms / 1000).toFixed(1)}s
+          {(call.duration_ms / 1000).toFixed(1)}s · {call.turns.length}{' '}
+          {call.turns.length === 1 ? 'turn' : 'turns'}
         </p>
       </div>
+
+      <CallOutcome call={call} />
 
       <div className="grid g4" style={{ marginBottom: 16 }}>
         <Metric k="Turns" v={String(call.turns.length)} s="exchanges" tone="var(--accent)" />
@@ -224,3 +227,63 @@ function Metric({ k, v, s, tone }: { k: string; v: string; s: string; tone: stri
 }
 
 export { Icon }
+
+
+/* ── what the call actually DID ──────────────────────────────────────────────
+ *
+ * The heading above is `call.summary`, which is the caller's opening sentence verbatim -- a
+ * quote, not a summary. Useful for recognising a call in a list; useless for the first question
+ * anyone asks of one, which is "did it work?".
+ *
+ * Answering that meant reading the whole transcript, and on a thirty-turn call nobody does.
+ * So the outcome is stated: booked and its reference, passed to a person, or nothing agreed.
+ */
+function CallOutcome({ call }: { call: CallDetail }) {
+  const appointment = call.appointment
+  const at = appointment ? new Date(appointment.starts_at) : null
+
+  if (appointment && at) {
+    return (
+      <div className="outcome" data-t="good">
+        <Icon name="check" size={17} />
+        <div>
+          <b>Appointment booked</b>
+          <p>
+            {at.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}
+            {' at '}
+            {at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+            {appointment.patient_name && <> · {appointment.patient_name}</>}
+            {appointment.reason && <> · {appointment.reason}</>}
+          </p>
+        </div>
+        <code className="ref">{appointment.reference}</code>
+      </div>
+    )
+  }
+
+  if (call.escalated) {
+    return (
+      <div className="outcome" data-t="warn">
+        <Icon name="user" size={17} />
+        <div>
+          <b>Passed to a person</b>
+          <p>The agent handed over rather than finishing the call itself.</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="outcome">
+      <Icon name="chat" size={17} />
+      <div>
+        <b>{call.turns.length ? 'Nothing was booked' : 'Nobody spoke'}</b>
+        <p>
+          {call.turns.length
+            ? 'The caller asked questions and the call ended without an appointment.'
+            : 'The call connected but no caller speech was recorded.'}
+        </p>
+      </div>
+    </div>
+  )
+}
