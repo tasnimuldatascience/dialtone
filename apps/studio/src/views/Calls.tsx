@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { ViewProps } from '../App'
 import { api, type CallDetail, type CallRow, type Timing } from '../api'
 import { Icon } from '../components/Icon'
-import { Mood, Outcome } from './Dashboard'
+import { Mood } from './Dashboard'
 
 /* Reading a call back.
  *
@@ -43,12 +43,25 @@ export function Calls({ initialCallId }: ViewProps & { initialCallId?: string })
           <h1>Call history</h1>
           <p>Every call, with its transcript, timings and checks.</p>
         </div>
+        {/* Filters on what HAPPENED, with counts, so the tab itself tells you whether it is
+            worth opening. "Handled / Passed on / Hung up" filtered on the socket's outcome, which
+            was "completed" for every call, so two of the three tabs were always empty. */}
         <div className="row">
-          {['', 'completed', 'transferred', 'abandoned'].map((f) => (
-            <button key={f} className="btn btn-ghost btn-sm" data-active={filter === f} onClick={() => setFilter(f)}>
-              {f === '' ? 'All' : f === 'transferred' ? 'Passed on' : f === 'abandoned' ? 'Hung up' : 'Handled'}
-            </button>
-          ))}
+          {RESULTS.map((r) => {
+            const n = r.key === '' ? calls.length : calls.filter((c) => c.result === r.key).length
+            return (
+              <button
+                key={r.key}
+                className="btn btn-ghost btn-sm"
+                data-active={filter === r.key}
+                disabled={n === 0 && r.key !== ''}
+                onClick={() => setFilter(r.key)}
+              >
+                {r.label}
+                <b className="tab-n">{n}</b>
+              </button>
+            )
+          })}
         </div>
       </div>
 
@@ -59,11 +72,9 @@ export function Calls({ initialCallId }: ViewProps & { initialCallId?: string })
           <table>
             <thead>
               <tr>
-                <th>What they wanted</th>
-                <th>Agent</th>
+                <th style={{ width: '38%' }}>What they wanted</th>
+                <th>What happened</th>
                 <th>Channel</th>
-                <th>Outcome</th>
-                <th>Mood</th>
                 <th style={{ textAlign: 'right' }}>Turns</th>
                 <th style={{ textAlign: 'right' }}>Length</th>
                 <th style={{ textAlign: 'right' }}>When</th>
@@ -71,13 +82,26 @@ export function Calls({ initialCallId }: ViewProps & { initialCallId?: string })
             </thead>
             <tbody>
               {calls.map((c) => (
-                <tr key={c.id} data-clickable onClick={() => void open(c.id)}>
-                  <td style={{ maxWidth: 340 }}>{c.summary || <span style={{ color: 'var(--text-3)' }}>no speech</span>}</td>
-                  <td style={{ color: 'var(--text-2)' }}>{c.agent_name}</td>
+                <tr key={c.id} data-clickable onClick={() => void open(c.id)} data-quiet={c.result === 'no speech' || undefined}>
+                  <td>
+                    {/* What it was about, then what they said. The opening line alone was the
+                        whole column, and on anything longer than one turn it describes where the
+                        call STARTED rather than what it was for. */}
+                    {c.wanted && <div className="wanted">{c.wanted}</div>}
+                    <div className={c.wanted ? 'said' : 'wanted'}>
+                      {c.summary
+                        ? (c.wanted ? `“${c.summary}”` : c.summary)
+                        : <span style={{ color: 'var(--text-3)' }}>nobody spoke</span>}
+                    </div>
+                    {/* Mood only when it is NOT neutral. It was neutral on every row, and a
+                        badge that always says the same thing trains the eye to skip it. */}
+                    {c.sentiment && c.sentiment !== 'neutral' && (
+                      <Mood value={c.sentiment} />
+                    )}
+                  </td>
+                  <td><Happened call={c} /></td>
                   <td><span className="chip" data-t={c.channel === 'voice' ? 'agent' : undefined}>{c.channel}</span></td>
-                  <td><Outcome value={c.outcome} escalated={!!c.escalated} /></td>
-                  <td><Mood value={c.sentiment} /></td>
-                  <td className="n">{c.turn_count}</td>
+                  <td className="n">{c.turn_count || <span style={{ color: 'var(--text-3)' }}>—</span>}</td>
                   <td className="n">{(c.duration_ms / 1000).toFixed(1)}s</td>
                   <td className="n" style={{ color: 'var(--text-dim)' }}>{c.started_at.slice(11, 16)}</td>
                 </tr>
@@ -88,6 +112,49 @@ export function Calls({ initialCallId }: ViewProps & { initialCallId?: string })
       )}
     </div>
   )
+}
+
+const RESULTS: { key: string; label: string }[] = [
+  { key: '', label: 'All' },
+  { key: 'booked', label: 'Booked' },
+  { key: 'answered', label: 'Answered' },
+  { key: 'passed on', label: 'Passed on' },
+  { key: 'no speech', label: 'Nobody spoke' },
+]
+
+/* What the call DID, in one cell.
+ *
+ * Replaces two columns that carried nothing. "Outcome" read `completed` on all sixteen calls on
+ * screen — it records how the socket ended, not what the call achieved — and "Mood" read
+ * `neutral` on all sixteen, which is a coarse word-list guess doing its honest best. Three of the
+ * six columns were constant, and a constant column teaches the eye to stop reading that strip.
+ *
+ * A booked call carries its reference, because that is the thing somebody quotes back.
+ */
+function Happened({ call }: { call: CallRow }) {
+  if (call.result === 'booked') {
+    const at = call.booked_for ? new Date(call.booked_for) : null
+    return (
+      <div className="happened" data-t="booked">
+        <Icon name="check" size={13} />
+        <span>
+          Booked
+          {at && <em>{at.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}, {at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</em>}
+        </span>
+        <code className="ref">{call.booked_reference}</code>
+      </div>
+    )
+  }
+  if (call.result === 'passed on') {
+    return <div className="happened" data-t="warn"><Icon name="user" size={13} /><span>Passed to a person</span></div>
+  }
+  if (call.result === 'no speech') {
+    return <div className="happened" data-t="quiet"><span>Nobody spoke</span></div>
+  }
+  if (call.result === 'abandoned') {
+    return <div className="happened" data-t="warn"><Icon name="x" size={13} /><span>Hung up</span></div>
+  }
+  return <div className="happened"><Icon name="chat" size={13} /><span>Questions answered</span></div>
 }
 
 function Detail({ call, onBack }: { call: CallDetail; onBack: () => void }) {
@@ -102,7 +169,10 @@ function Detail({ call, onBack }: { call: CallDetail; onBack: () => void }) {
         <button className="btn btn-ghost btn-sm" onClick={onBack} style={{ marginBottom: 12 }}>
           ← All calls
         </button>
-        <h1>{call.summary || 'Call'}</h1>
+        <h1>{call.wanted || call.summary || 'Call'}</h1>
+        {call.wanted && call.summary && (
+          <p className="said" style={{ marginBottom: 6 }}>“{call.summary}”</p>
+        )}
         <p>
           {call.agent_name} · {call.started_at.replace('T', ' ').slice(0, 16)} ·{' '}
           {(call.duration_ms / 1000).toFixed(1)}s · {call.turns.length}{' '}

@@ -636,3 +636,43 @@ code { font-family: var(--mono); font-size: 13px; background: var(--bg-0); borde
 .cap { display: inline-flex; gap: 3px; align-items: center; flex-shrink: 0; }
 .cap b { width: 5px; height: 12px; border-radius: 2px; background: var(--line-2); display: block; }
 .cap b[data-on='true'] { background: var(--accent); }
+
+
+/* ── what a call did ───────────────────────────────────────────────────────
+ * One cell replacing two that were constant on every row. */
+.happened { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.happened svg { color: var(--text-3); flex-shrink: 0; }
+.happened span { color: var(--text-2); }
+.happened em { font-style: normal; color: var(--text-dim); margin-left: 7px; font-size: var(--t-sm); }
+.happened[data-t='booked'] svg, .happened[data-t='booked'] span { color: var(--good); }
+.happened[data-t='booked'] span { font-weight: var(--w-medium); }
+.happened[data-t='warn'] svg, .happened[data-t='warn'] span { color: var(--cost); }
+.happened[data-t='quiet'] span { color: var(--text-3); }
+.happened .ref { font-size: 11.5px; }
+
+/* The caller's opening line, clamped to two lines rather than truncated mid-word: a booking call
+   opens with a sentence, and one line of it is usually not enough to recognise the call by. */
+.wanted {
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; line-height: 1.45;
+}
+
+/* A call where nobody spoke is real and should be findable, but it is not what anyone came to
+   the list to read. */
+tbody tr[data-quiet] td { color: var(--text-3); }
+
+/* The count on a filter tab, so it says whether it is worth opening before you open it. */
+.tab-n {
+  margin-left: 7px; font-weight: var(--w-medium); font-family: var(--mono);
+  font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--text-3);
+}
+.btn[data-active='true'] .tab-n { color: inherit; }
+
+/* The caller's own opening words, under what the call was about. Quiet and quoted: it is there
+   to help recognise a call, not to be read as the summary. */
+.said {
+  margin: 2px 0 0; font-size: var(--t-sm); color: var(--text-3); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 1; line-clamp: 1; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.wanted { font-weight: var(--w-medium); color: var(--text); }

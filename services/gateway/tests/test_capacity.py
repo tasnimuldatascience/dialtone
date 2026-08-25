@@ -100,9 +100,13 @@ class TestItIsVisible:
         assert p.capacity["available"] == 3
 
     def test_the_default_is_where_the_measurements_put_it(self):
-        """Two concurrent callers cost nothing; four doubles the turn time. Three is the last
-        number that is still a phone call."""
-        assert DEFAULT_MAX_CALLS == 3
+        """TWO, and it was three until a five-caller run showed what three feels like: a median
+        turn of 5.2 seconds on voice and 5.7 on text. That is not a phone call.
+
+        Three had been picked by splitting the difference between the 2699ms measured at two
+        callers and the 5929ms measured at four -- which is how a number ends up looking rigorous
+        and being a guess. It was measured instead, and it moved."""
+        assert DEFAULT_MAX_CALLS == 2
         assert platform().capacity["limit"] == DEFAULT_MAX_CALLS
 
     def test_the_operator_can_raise_it(self, monkeypatch):

@@ -251,6 +251,36 @@ class Conversation:
             )
 
         slots = self.open_slots()
+
+        # THE TIME THEY AGREED HAS GONE. Two callers overlapping are both shown the same free
+        # slot -- correctly, it was free when each was offered it -- and only one INSERT can win.
+        # The database has always prevented the double booking. Nobody had ever told the loser.
+        #
+        # Seen on a five-caller run: two people were offered tomorrow at eight thirty, one got it,
+        # and the other's call simply carried on as though nothing had happened. Their agreement
+        # is cleared here so a fresh time can be offered, rather than leaving them confirming
+        # something that no longer exists.
+        if (
+            self.memory.proposed_iso
+            and not self.memory.booked_reference
+            and self.memory.proposed_iso not in {s.iso for s in slots}
+        ):
+            gone = self.memory.proposed_slot
+            self.memory.proposed_slot = ""
+            self.memory.proposed_iso = ""
+            self.memory.slot_confirmed = False
+            # The DAY survives. Losing ten o'clock does not mean they no longer want tomorrow,
+            # and clearing it made "how about eleven then" land on nothing -- the caller would
+            # have had to say the day again, having already said it twice.
+            self.memory.when = When(day=self.memory.when.day)
+            nearest = offer_text(slots[:2], self.today) if slots else ""
+            return (
+                f"{gone} has JUST been taken by another caller. It was free when you offered it "
+                f"and it is not any more.\n"
+                f"Apologise in half a sentence -- briefly, this is not a disaster -- and offer "
+                f"{nearest or 'another day'} instead. Do not pretend it is still available."
+            )
+
         if not slots:
             return "Nothing is free in the next two weeks. Offer to take a number instead."
 
@@ -311,11 +341,20 @@ class Conversation:
                 f"else."
             )
         elif satisfied and (want.day or want.part):
-            # They asked for a window and the window has slots in it. Say yes.
+            # ONE TIME, NOT A CHOICE. They have already narrowed it -- "tomorrow morning" -- so
+            # the remaining question is answerable with a yes.
+            #
+            # Offering two produced exactly the tangle you would expect: "you can come at either
+            # 8:30 or 9:00", "yes, that works", "please confirm your preferred day and time". The
+            # caller answered the question they were asked; it was the wrong question. A yes/no
+            # can be booked on. An either/or costs a turn and can still be ambiguous after it.
+            first = picks[0]
+            self.memory.proposed_slot = first.spoken(self.today)
+            self.memory.proposed_iso = first.iso
             lines.append(
-                "What they asked for IS available -- the times above are exactly what they "
-                "asked for. Say yes and offer one or two of them. Never tell them there is "
-                "nothing free."
+                f"What they asked for IS available. Offer {first.spoken(self.today)} -- that ONE "
+                f"time, not a choice between several -- and ask them to confirm it, so that "
+                f"\"yes\" is an answer you can book on. Never tell them there is nothing free."
             )
         elif want.day or want.part:
             lines.append(

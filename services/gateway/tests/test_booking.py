@@ -393,9 +393,11 @@ class TestWhatTheModelIsTold:
         convo.memory.observe("are you free tomorrow morning")
         note = convo._scheduling_note()
 
-        assert "IS available" in note
+        # Asserted on the meaning rather than the sentence: with details still outstanding the
+        # note is the one about the form, and it names the free time in its first clause.
         assert "NOT free" not in note
-        assert "Never tell them there is nothing free" in note
+        assert "is free" in note.lower()
+        assert convo.memory.proposed_slot, "a morning slot should have been put on the table"
 
     def test_a_full_morning_is_reported_as_full(self):
         """The other direction, which is what makes the test above worth having: saying yes to
@@ -510,6 +512,10 @@ class TestWhatTheModelIsTold:
         """The list in the prompt is the list the calendar returned, filtered to nothing else.
         A model cannot offer a time it was never shown."""
         convo, _ = self.conversation()
+        # Details in, so the note is the scheduling one rather than the one about the form.
+        for field, value in [("name", "Sam Hassan"), ("phone", "(212) 555-9876"),
+                             ("email", "sam@example.com"), ("reason", "a cleaning")]:
+            convo.memory.tell(field, value)
         convo.memory.observe("sometime thursday afternoon")
         note = convo._scheduling_note()
 

@@ -116,6 +116,22 @@ export interface CallRow {
   summary: string
   channel: string
   turn_count: number
+  /**
+   * What actually happened, as a word you can filter on.
+   *
+   * NOT `outcome`, which records how the socket ended and reads "completed" for every call ever
+   * placed. A column with the same value on every row is not a column.
+   */
+  result: 'booked' | 'answered' | 'passed on' | 'no speech' | 'abandoned'
+  /**
+   * What the call was ABOUT, derived from what the agent looked up and what it did.
+   *
+   * `summary` is the caller's opening words — what the call SOUNDED like. Two different
+   * questions, and one string was answering neither well.
+   */
+  wanted: string
+  booked_reference: string | null
+  booked_for: string | null
 }
 
 export interface Timing {

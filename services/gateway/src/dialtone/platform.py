@@ -49,11 +49,20 @@ class AtCapacity(RuntimeError):
 
 #: How many calls this process will carry at once.
 #:
-#: Three, because that is where the measurements put it: two concurrent callers cost nothing,
-#: four doubles the turn time, eight makes the first word arrive after five seconds. The number
-#: belongs to the hardware rather than to the code, so it is an environment variable -- a GPU or
-#: a smaller model moves it, and nothing else has to change.
-DEFAULT_MAX_CALLS = 3
+#: TWO, and it was three until a five-caller run showed what three actually feels like: a median
+#: turn of 5.2 seconds on voice and 5.7 on text. That is not a phone call. The earlier sweep had
+#: measured 2699ms at two callers and 5929ms at four, and three was picked by splitting the
+#: difference rather than by measuring it -- which is how a number ends up looking rigorous and
+#: being a guess.
+#:
+#:     1 caller    first token 1114ms   whole turn 3091ms
+#:     2 callers   first token 1054ms   whole turn 2699ms
+#:     3 callers                        whole turn ~5500ms   <- measured on a real 5-caller run
+#:     4 callers   first token 3427ms   whole turn 5929ms
+#:
+#: The number belongs to the hardware rather than to the code, so it is an environment variable
+#: -- a GPU or a smaller model moves it and nothing else has to change.
+DEFAULT_MAX_CALLS = 2
 
 
 @dataclass(slots=True)
@@ -254,6 +263,7 @@ class Platform:
             escalated=escalated,
             sentiment=_sentiment(convo),
             summary=_summary(convo),
+            wanted=_wanted(convo),
             duration_ms=live.duration_ms,
         )
         return self.store.get_call(call_id)
@@ -457,6 +467,64 @@ def _sentiment(convo: Conversation) -> str:
     if positive > negative:
         return "positive"
     return "neutral"
+
+
+#: A document the agent consulted, turned into what the caller was asking about. The mapping is
+#: the operator's content, so an unknown title falls through to itself rather than to nothing.
+_TOPICS = {
+    "Prices": "Asked about prices",
+    "Opening hours": "Asked about opening hours",
+    "Where we are": "Asked where we are",
+    "Parking and access": "Asked about parking",
+    "Emergencies": "Dental emergency",
+    "Appointments and cancellations": "Asked about cancelling",
+}
+
+
+def _wanted(convo: Conversation) -> str:
+    """What the caller rang for, in a few words.
+
+    NOT THE FIRST LINE OF THE TRANSCRIPT, which is what this column used to be. A quote is fine
+    for a one-turn question -- "how much is a check-up?" is both the opening line and the whole
+    call -- and useless for anything longer: an eleven-turn booking read "hi, I need an
+    appointment, my tooth is hurting", which is where it STARTED and says nothing about where it
+    went.
+
+    Derived from what the call actually did rather than from what was said first: the reason it
+    extracted, the documents it had to look up, whether it booked, whether it handed over. No
+    model call -- a summary that costs a generation on every call teardown is a summary an
+    operator turns off.
+    """
+    from collections import Counter
+
+    reason = convo.memory.get("reason")
+    if convo.memory.booked_reference:
+        return f"Booked — {reason}" if reason else "Booked an appointment"
+    if convo.state and convo.state.transferred:
+        return "Asked for a person"
+
+    # What the agent had to look up IS what the caller asked about. Counted across the call, so a
+    # passing mention does not outrank the subject.
+    docs = Counter(
+        c["document"] for turn in convo.turns for c in turn.citations if c.get("document")
+    )
+    topic = _TOPICS.get(docs.most_common(1)[0][0], "") if docs else ""
+
+    # A CALL WHERE A TIME WAS DISCUSSED IS AN APPOINTMENT CALL, whatever the agent had to read
+    # along the way. Leading with the topic gave "Asked about prices — cleaning" for somebody who
+    # rang to book a cleaning and was quoted a price on the way, which describes the detour
+    # rather than the journey.
+    if convo.memory.proposed_slot or convo.memory.when.day is not None:
+        return f"Wanted an appointment — {reason}" if reason else "Wanted an appointment"
+    if reason and topic:
+        return f"{topic} — {reason}"
+    if reason:
+        return f"Wanted an appointment — {reason}"
+    if topic:
+        return topic
+    if not convo.turns:
+        return "Nobody spoke"
+    return ""            # nothing derivable; the caller's own words are the better fallback
 
 
 def _summary(convo: Conversation) -> str:

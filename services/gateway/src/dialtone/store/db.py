@@ -186,6 +186,7 @@ class Store:
         """
         for table, column, ddl in (
             ("agents", "intake_json", "ALTER TABLE agents ADD COLUMN intake_json TEXT"),
+            ("calls", "wanted", "ALTER TABLE calls ADD COLUMN wanted TEXT"),
         ):
             have = {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}
             if column not in have:
@@ -373,12 +374,18 @@ class Store:
 
     def end_call(self, call_id: str, *, outcome: str = "completed", resolved: bool = False,
                  escalated: bool = False, sentiment: str = "neutral", summary: str = "",
-                 duration_ms: int = 0) -> None:
+                 wanted: str = "", duration_ms: int = 0) -> None:
+        """Close a call.
+
+        `summary` is the caller's own opening words -- what the call SOUNDED like. `wanted` is
+        what it was ABOUT, derived from what the agent had to look up and what it ended up doing.
+        Two different questions, and one string was answering neither well.
+        """
         with self._lock:
             self._db.execute(
                 "UPDATE calls SET ended_at = ?, outcome = ?, resolved = ?, escalated = ?, "
-                "sentiment = ?, summary = ?, duration_ms = ? WHERE id = ?",
-                (_now(), outcome, int(resolved), int(escalated), sentiment, summary,
+                "sentiment = ?, summary = ?, wanted = ?, duration_ms = ? WHERE id = ?",
+                (_now(), outcome, int(resolved), int(escalated), sentiment, summary, wanted,
                  duration_ms, call_id),
             )
             self._db.commit()
@@ -404,6 +411,9 @@ class Store:
         call = dict(row)
         call["turns"] = [_turn(t) for t in turns]
         call["appointment"] = dict(booked) if booked else None
+        call["booked_reference"] = booked["reference"] if booked else None
+        call["turn_count"] = len(turns)
+        call["result"] = _result(call)
         return call
 
     def list_calls(self, *, agent_id: str | None = None, limit: int = 100,
@@ -417,13 +427,22 @@ class Store:
             params.append(outcome)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         with self._lock:
+            # THE BOOKING REFERENCE COMES BACK WITH THE ROW. Without it the list could say a call
+            # "completed" -- which was true of all sixteen calls on screen and told an operator
+            # nothing -- while the question they are actually asking is "did this one book?".
             rows = self._db.execute(
                 f"SELECT c.*, a.name AS agent_name, "
-                f"  (SELECT COUNT(*) FROM turns t WHERE t.call_id = c.id) AS turn_count "
+                f"  (SELECT COUNT(*) FROM turns t WHERE t.call_id = c.id) AS turn_count, "
+                f"  (SELECT ap.reference FROM appointments ap "
+                f"     WHERE ap.call_id = c.id AND ap.status = 'booked' "
+                f"     ORDER BY ap.created_at LIMIT 1) AS booked_reference, "
+                f"  (SELECT ap.starts_at FROM appointments ap "
+                f"     WHERE ap.call_id = c.id AND ap.status = 'booked' "
+                f"     ORDER BY ap.created_at LIMIT 1) AS booked_for "
                 f"FROM calls c LEFT JOIN agents a ON a.id = c.agent_id {clause} "
                 f"ORDER BY c.started_at DESC LIMIT ?", (*params, limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        return [_call_row(dict(r)) for r in rows]
 
     # -- campaigns ---------------------------------------------------------
     def create_campaign(self, agent_id: str, name: str, script: str = "") -> dict[str, Any]:
@@ -636,6 +655,50 @@ def _percentile(values: list[float], q: float) -> float:
         return 0.0
     index = min(len(values) - 1, max(0, int(q * len(values)) - 1))
     return round(values[index], 1)
+
+
+#: What actually happened on a call, as a word an operator can filter on.
+#:
+#: NOT the `outcome` column, which records how the SOCKET ended and read "completed" for every
+#: call ever placed. A column whose value is the same on every row is not a column; it is a
+#: decoration that costs horizontal space and teaches the reader to stop looking at that part of
+#: the screen.
+def _result(row: dict[str, Any]) -> str:
+    if row.get("booked_reference"):
+        return "booked"
+    if row.get("escalated"):
+        return "passed on"
+    if not row.get("turn_count"):
+        # Connected and nobody said anything: a hang-up, a wrong number, or a test. Worth its own
+        # word rather than being filed under the same label as a call that did something.
+        return "no speech"
+    if row.get("outcome") == "abandoned":
+        return "abandoned"
+    return "answered"
+
+
+def _call_row(row: dict[str, Any]) -> dict[str, Any]:
+    row["result"] = _result(row)
+    # Rows written before the column existed have nothing in it, and a history that is blank for
+    # everything older than a deploy is worse than one that is merely coarse.
+    if not row.get("wanted"):
+        row["wanted"] = _wanted_from_row(row)
+    return row
+
+
+def _wanted_from_row(row: dict[str, Any]) -> str:
+    """A best guess for a call recorded before `wanted` was stored.
+
+    Only what the row itself carries -- no turn lookup, because this runs once per row in a list
+    of two hundred and a query per row is how a list gets slow.
+    """
+    if row.get("booked_reference"):
+        return "Booked an appointment"
+    if row.get("escalated"):
+        return "Asked for a person"
+    if not row.get("turn_count"):
+        return "Nobody spoke"
+    return ""
 
 
 def _agent(row: sqlite3.Row) -> dict[str, Any]:

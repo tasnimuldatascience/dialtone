@@ -162,8 +162,11 @@ class TestWhatTheAgentOffered:
         convo, _ = conversation()
         convo.memory.observe("can I come tomorrow morning?")
         convo._scheduling_note()
+        # The note itself puts a real slot on the table; what matters is that a reply naming a
+        # time nobody offered does not MOVE it.
+        before = convo.memory.proposed_iso
         assert convo._slot_the_agent_offered("How about three in the morning?") == ""
-        assert convo.memory.proposed_iso == ""
+        assert convo.memory.proposed_iso == before
 
     def test_a_reply_with_no_time_in_it_offers_nothing(self):
         convo, _ = conversation()
