@@ -491,6 +491,38 @@ $ python scripts/multi-client.py
 
 ---
 
+## What the operator sees afterwards
+
+Every call is on one screen, and the column that matters is the first one.
+
+![Call history](docs/img/calls.png)
+
+**"What they wanted" used to be the first line of the transcript.** That works for a one-turn
+question — *"how much is a check-up?"* is both the opening line and the entire call — and says
+nothing about anything longer. An eleven-turn booking read *"hi, I need an appointment, my tooth
+is hurting"*, which is where it STARTED. It is not what the call was about.
+
+It is derived from what the call DID instead: the reason the agent extracted, the documents it
+had to look up, whether it booked, whether it handed over. No model call — a summary that costs a
+generation on every teardown is a summary an operator turns off. The caller's own words are still
+there, quoted, underneath.
+
+"What happened" was worse: `completed` on all sixteen rows, and `neutral` beside it. A column with
+one value in it is not information, it is furniture. There are five outcomes now and every one of
+them is a fact from the database rather than a status string — `Booked` carries the date and the
+reference, `Passed to a person` means the flow reached `handoff`, `Nobody spoke` means no caller
+turn was ever recorded. The tabs count them, so "show me the calls that booked" is one click.
+
+![One call](docs/img/call-detail.png)
+
+Opening a call shows the transcript with the flow moves and the documents cited **inline under
+each reply** — `greet → preferred_day · Emergencies` — so "why did it say that?" is answered by
+reading rather than by correlating logs. Timings are per turn and measured, the appointment is
+the database row rather than a claim the agent made, and unverified numbers and redactions are
+counted at the top: two zeroes that are worth showing precisely because they are usually zero.
+
+---
+
 ## Interruptions: the bug most phone agents have
 
 When a caller talks over the agent, you stop the audio. Simple. But there is a trap.

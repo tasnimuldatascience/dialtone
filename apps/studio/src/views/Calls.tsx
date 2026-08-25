@@ -236,7 +236,13 @@ function Detail({ call, onBack }: { call: CallDetail; onBack: () => void }) {
                       {t.timing && <span>{Math.round(t.timing.total_ms)}ms</span>}
                       {t.node && <span>{t.node}</span>}
                       {t.moved_to && <span style={{ color: 'var(--accent)' }}>→ {t.moved_to}</span>}
-                      {t.citations?.map((c, j) => <span key={j} style={{ color: 'var(--info)' }}>{c.document}</span>)}
+                      {/* By DOCUMENT, deduped. Retrieval returns passages, and two passages
+                          from the same page are two citations -- which rendered as
+                          "Emergencies  Emergencies" under a reply and reads as a bug. What
+                          the line answers is "where did this come from", and that is the page. */}
+                      {[...new Set((t.citations ?? []).map((c) => c.document))].map((doc) => (
+                        <span key={doc} style={{ color: 'var(--info)' }}>{doc}</span>
+                      ))}
                     </div>
                   </div>
                 </div>

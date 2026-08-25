@@ -39,7 +39,12 @@ async function main() {
   const page = await context.newPage()
 
   const shot = async (name, fullPage = false) => {
-    await page.screenshot({ path: `${OUT}/${name}.png`, fullPage })
+    // ANIMATIONS FROZEN TO THEIR END STATE. Every bubble carries `animation: rise .22s`, and a
+    // shot taken while that is in flight catches them part-way faded -- which produced a
+    // transcript of grey-on-grey text that looked like a contrast bug and was a timing one.
+    // `disabled` finishes them instantly rather than skipping them, so the image is what a
+    // settled page looks like, on every machine, every run.
+    await page.screenshot({ path: `${OUT}/${name}.png`, fullPage, animations: 'disabled' })
     console.log(`  ${name}.png`)
   }
 
@@ -101,6 +106,31 @@ async function main() {
   })
   await page.waitForTimeout(500)
   await shot('corpus')
+
+  // ── call history ─────────────────────────────────────────────────────────
+  // The screen an operator spends the most time on, and the one that had no picture in the
+  // README at all -- so two rounds of "the history does not feel complete" were about a screen
+  // nobody reading the repo could see.
+  await nav('Call history')
+  await page.waitForFunction(
+    () => document.querySelectorAll('tbody tr').length >= 4, null, { timeout: 30_000 },
+  )
+  await shot('calls')
+
+  // A single call, opened. NOT the newest row: the newest is the chat this script started
+  // two steps ago, and its turns are still being written when the click lands -- the first
+  // version of this shot was a full set of metrics beside an empty transcript panel, which
+  // is a screenshot of a bug that does not exist.
+  //
+  // So: a row that BOOKED something, and the wait is on the bubbles themselves rather than on
+  // a heading that renders whether or not the transcript arrived.
+  const booked = page.locator('tbody tr').filter({ hasText: /booked/i }).first()
+  await (await booked.count() ? booked : page.locator('tbody tr').last()).click()
+  await page.waitForFunction(
+    () => document.querySelectorAll('.bubble').length >= 2, null, { timeout: 20_000 },
+  )
+  await shot('call-detail', true)
+  await page.getByRole('button', { name: /All calls/ }).click()
 
   // ── the flow ─────────────────────────────────────────────────────────────
   await nav('Conversation flow')
