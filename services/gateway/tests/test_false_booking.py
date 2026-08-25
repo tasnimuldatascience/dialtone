@@ -135,3 +135,44 @@ class TestTheRealCall:
         convo.memory.booked_reference = "NG5EA086"
         # The guard is gated on `booked_reference` being empty; with one set it never runs.
         assert convo.memory.booked_reference
+
+
+class TestTheSentenceFromTheDemoVideo:
+    """FOUND IN A RECORDING. `scripts/demo-video.mjs` drives a real call and records it, and frame
+    0:30 of the first take had the agent saying an appointment was reserved when the caller had not
+    yet typed an email and nothing had been written.
+
+    The guard missed it because it wanted the noun and the verb next to each other -- "appointment
+    is booked" -- and a real model does not write like that. Twenty words separated them.
+    """
+
+    QUOTED = ("Certainly! Your appointment for a cleaning on Wednesday, the twenty-sixth of "
+              "August, at nine thirty in the morning is already reserved.")
+
+    def test_the_claim_is_caught(self):
+        assert claims_a_booking(self.QUOTED)
+
+    def test_the_words_may_be_far_apart(self):
+        for reply in (
+            "Your appointment for a cleaning on Thursday at four is confirmed.",
+            "The slot you asked about on Friday morning has been reserved.",
+            "That appointment, the one at nine thirty, was made for you.",
+        ):
+            assert claims_a_booking(reply), reply
+
+    def test_it_does_not_reach_across_a_full_stop(self):
+        """Bounded by sentence, not by word count. Otherwise "would you like an appointment? I can
+        see Thursday is booked" reads as a claim about the caller's own booking, and every honest
+        mention of a full diary becomes a false positive."""
+        assert not claims_a_booking(
+            "Would you like an appointment? I can see that Thursday at ten is already booked."
+        )
+
+    def test_offering_and_refusing_still_do_not_fire(self):
+        for reply in (
+            "What time would you like the appointment?",
+            "I can check whether that slot is free.",
+            "The appointment cannot be booked until you type your email address.",
+            "Would you like me to book that appointment for you?",
+        ):
+            assert not claims_a_booking(reply), reply

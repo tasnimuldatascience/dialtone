@@ -160,6 +160,12 @@ class TurnRecord:
     #: the caller heard it, and recorded, because it is the single most damaging thing an agent
     #: can say and an operator should be able to count them.
     false_booking: str = ""
+    #: The reference of an appointment that WAS made on this turn and that the model's reply never
+    #: mentioned. The opposite failure to `false_booking` and the same kind of damage: the caller
+    #: has an appointment and does not know it, and never heard the reference. Counted rather than
+    #: logged away, because how often the model has to be overruled here is the number that says
+    #: whether a bigger model would earn its latency.
+    unannounced_booking: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -170,6 +176,7 @@ class TurnRecord:
             "grounding": self.grounding.as_dict(),
             "interrupted": self.interrupted, "heard": self.heard,
             "placeholder": self.placeholder, "false_booking": self.false_booking,
+            "unannounced_booking": self.unannounced_booking,
         }
 
 
@@ -516,11 +523,16 @@ class Conversation:
         # confirmed it. The reference only appeared a turn later.
         #
         # Now the booking is in the prompt before the model writes, so it can say what happened.
+        # Whether an appointment came into existence during THIS turn. A booking made three turns
+        # ago has already been read out; repeating the reference every turn afterwards is its own
+        # kind of broken.
+        just_booked = False
         early_booked = None
         if self.memory.proposed_slot and not self.memory.booked_reference and _confirms(safe_text):
             self.memory.slot_confirmed = True
             early_booked = self.book_if_ready()
             if early_booked:
+                just_booked = True
                 yield {"type": "booked", **early_booked}
             elif self.memory.ready_to_book:
                 yield {"type": "booking_failed", "reason": "that slot was just taken"}
@@ -580,11 +592,33 @@ class Conversation:
         # false -- however reasonable it sounded. Replaced with what is actually true, including
         # the reason, because "no" without a reason is its own kind of unhelpful.
         false_booking = ""
+        unannounced = ""
         if not self.memory.booked_reference:
             false_booking = claims_a_booking(reply)
             if false_booking:
                 log.warning("false booking claim %r on %s", false_booking, self.call_id)
                 reply = self._why_not_booked()
+
+        # AND THE MIRROR OF IT. The guard above catches the model saying an appointment exists
+        # when it does not. This catches the opposite, which is just as damaging and had no guard
+        # at all: an appointment that DOES exist, made by code on this very turn, and a reply that
+        # never mentions it.
+        #
+        # Recorded on video, which is how it was found. The caller said "yes, that works", the
+        # booking was written, `booked` was emitted BEFORE the first token, and the prompt for the
+        # turn opened with "THE APPOINTMENT IS NOW BOOKED ... say the reference letter by letter".
+        # The model wrote "Alright, let's proceed with booking your appointment. Could you confirm
+        # your name, phone number, and email address?" -- asking for details it already had, about
+        # a booking it had already made.
+        #
+        # A 1.5B model ignoring the strongest instruction in the prompt on the single most
+        # important turn of the call is not something to fix with firmer wording. This is the same
+        # conclusion the rest of the module reached: the model proposes, code decides.
+        if silent_booking(reply, self.memory.booked_reference) and just_booked:
+            log.warning("reply did not mention booking %s on %s",
+                        self.memory.booked_reference, self.call_id)
+            unannounced = self.memory.booked_reference
+            reply = self._confirm_booking()
 
         timing.mark("speak")
 
@@ -673,12 +707,27 @@ class Conversation:
             citations=[_citation(h) for h in hits], tools=tool_records,
             redacted=removed, refused=refused, grounding=grounding,
             placeholder=placeholder, false_booking=false_booking,
+            unannounced_booking=unannounced,
         )
         self.turns.append(record)
         yield {
             "type": "done", **record.as_dict(), "ended": self.ended,
             "memory": self.memory.as_dict(), "booked": booked,
         }
+
+    def _confirm_booking(self) -> str:
+        """The confirmation, composed by code, for when the model failed to give one.
+
+        Three things and nothing else, which is what the prompt asks for and what a receptionist
+        actually says: that it is done, when it is, and the reference. The reference is spelled by
+        `speakable` on its way to the voice engine, so it is written plainly here.
+        """
+        when = self.memory.proposed_slot or "the time we agreed"
+        return (
+            f"That is booked for you — {when}. "
+            f"Your reference is {self.memory.booked_reference}. "
+            f"Is there anything else I can help with?"
+        )
 
     def _why_not_booked(self) -> str:
         """What to say instead of claiming an appointment that does not exist.
@@ -1063,8 +1112,15 @@ _PLACEHOLDER = re.compile(
 #: Ways of saying "that is done" that a caller would hang up on.
 _CLAIMS_BOOKED = re.compile(
     r"\b(?:"
-    r"(?:appointment|booking|slot|reservation)s?\s+(?:is|are|has been|have been|'s)"
-    r"\s+(?:now\s+)?(?:booked|scheduled|confirmed|set|reserved|arranged)"
+    # THE NOUN AND THE VERB ARE RARELY ADJACENT. This wanted "appointment is booked" and a
+    # recorded demo produced "your appointment for a cleaning on Wednesday, the twenty-sixth
+    # of August, at nine thirty in the morning is already reserved" -- twenty words apart, and
+    # nothing was reserved. `[^.!?]` keeps the gap inside one sentence, so a claim in one
+    # sentence cannot borrow a verb from the next.
+    r"(?:appointment|booking|slot|reservation)s?[^.!?]{0,90}?\s"
+    r"(?:is|are|has been|have been|'s|was|were)"
+    r"\s+(?:now\s+|already\s+|all\s+)?"
+    r"(?:booked|scheduled|confirmed|set|reserved|arranged|made|secured|in\s+the\s+book)"
     r"|(?:i|we)(?:'ve|\s+have|'ll|\s+will)?\s+(?:now\s+)?"
     r"(?:booked|scheduled|reserved|confirmed|arranged|put\s+you\s+(?:in|down))"
     r"|you(?:'re|\s+are)?\s+(?:all\s+)?(?:booked|set)"
@@ -1073,6 +1129,21 @@ _CLAIMS_BOOKED = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+def silent_booking(reply: str, reference: str) -> bool:
+    """An appointment exists and the reply does not say so.
+
+    TRUE ONLY IF THE REPLY IS SILENT ABOUT IT. A reply that names the reference has plainly
+    announced it; so has one that says it is booked in words, which `claims_a_booking` already
+    recognises and which is CORRECT once there is a reference to back it up. The guard is for the
+    third case -- a reply that carries on as though nothing happened.
+    """
+    if not reference:
+        return False
+    if reference.lower() in reply.lower():
+        return False
+    return not claims_a_booking(reply)
 
 
 def claims_a_booking(reply: str) -> str:
