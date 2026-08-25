@@ -206,7 +206,7 @@ def build_flow() -> Flow:
                 id="reason",
                 kind=NodeKind.COLLECT,
                 objective=(
-                    "Find out what they need to come in for — a check-up, a cleaning, pain. "
+                    "Find out what they need to come in for — a check-up, a scale and polish, pain. "
                     "One short question. Do NOT ask for their name, phone number or email; "
                     "those are typed on screen and you will be told them."
                 ),

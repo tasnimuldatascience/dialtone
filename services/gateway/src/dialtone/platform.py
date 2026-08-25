@@ -326,7 +326,7 @@ The office is closed for lunch between noon and one o'clock every weekday.
 """.strip(),
     "Prices": """
 A routine check-up costs seventy five dollars. This includes a full exam, x-rays if needed, and a
-cleaning.
+scale and polish.
 
 A white filling costs between one hundred eighty and three hundred forty dollars, depending on
 the size of the cavity.
@@ -337,7 +337,7 @@ There is no charge for a first consultation if you are joining the practice as a
 
 We accept most PPO insurance plans and we file the claim for you. We do not accept HMO plans. For
 patients without insurance we offer an in-house membership plan at twenty nine dollars a month,
-which covers two cleanings a year and twenty percent off other treatment.
+which covers two hygiene visits a year and twenty percent off other treatment.
 """.strip(),
     "Emergencies": """
 If you have severe toothache, a knocked-out tooth, or facial swelling, call us immediately and we

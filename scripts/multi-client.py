@@ -65,7 +65,7 @@ CLIENTS = [
     {
         "who": "Ama Boateng", "channel": "voice", "kind": "booking",
         "phone": "(212) 555-9801", "email": "ama@example.com",
-        "says": ["hello, I need to book a cleaning", "can I come tomorrow morning?"],
+        "says": ["hello, I need to book a scale and polish", "can I come tomorrow morning?"],
     },
     {
         "who": "Jonas Weber", "channel": "text", "kind": "booking",

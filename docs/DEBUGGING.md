@@ -29,7 +29,7 @@ with the same value in every row.
 | **"I want to speak to a human" was answered by asking what they needed booked** | The `handoff` node existed and three nodes had an edge to it. `_advance` always took the first edge, so the transfer was unreachable |
 | "Are you open on Saturday?" was filed as wanting a Saturday appointment | The plural was fixed with a word boundary. That was the wrong diagnosis — the question is about the practice, not about a date |
 | **A caller lost a race for a slot and was never told** | The `UNIQUE` constraint worked perfectly. They had agreed a time, the appointment did not exist, and nothing in the conversation said so |
-| "Asked about prices — cleaning" for someone booking a cleaning | The history line led with what was looked up, which was the detour, not the journey |
+| "Asked about prices — scale and polish" for someone booking one | The history line led with what was looked up, which was the detour, not the journey |
 | "Either 8:30 or 9:00?" — "yes, that works" | Offering two times invites an answer that cannot be booked on. It names one now |
 | The agent read "[insert location]" out loud | Nothing in the knowledge base gave the practice an address, and a model fills in a form |
 | The streaming voice repeated the last few words | It tracked a position in the written reply and used it to slice the spoken one |

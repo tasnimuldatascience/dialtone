@@ -553,7 +553,9 @@ class TestWhatTheModelIsTold:
         assert starts_at == "2026-03-03T10:00"
         assert fields["patient_name"] == "Tasnimul Hasan"
         assert fields["phone"] == "(212) 555-0142"
-        assert fields["reason"] == "cleaning"
+        # THE CLINICAL NAME, not the caller's. They said "a cleaning"; the record says what a
+        # dentist would write. Both vocabularies are real and they are not the same one.
+        assert fields["reason"] == "scale and polish"
 
     def test_booking_happens_once(self):
         """A caller who says "yes, great, thanks" three times has agreed once."""
@@ -569,3 +571,36 @@ class TestWhatTheModelIsTold:
         assert convo.book_if_ready() is not None
         assert convo.book_if_ready() is None
         assert len(book.written) == 1
+
+
+class TestWhatThePracticeCallsIt:
+    """Callers and clinicians do not use the same words, and the record belongs to the clinician.
+
+    "A cleaning" is what a patient rings up and asks for. No dentist writes it in a record, where
+    the procedure is a scale and polish. Both vocabularies are real; the agent has to understand
+    one and record the other, which is the whole reason `_REASONS` maps synonyms onto a single
+    term rather than storing whatever was said.
+    """
+
+    def memory(self) -> CallMemory:
+        return CallMemory(today=MONDAY)
+
+    def test_the_colloquial_word_still_works(self):
+        for said in ("I need a cleaning", "can I get my teeth cleaned",
+                     "I'd like to see the hygienist", "book me a scale and polish"):
+            memory = self.memory()
+            memory.observe(said)
+            assert memory.get("reason") == "scale and polish", said
+
+    def test_the_record_never_says_cleaning(self):
+        memory = self.memory()
+        memory.observe("hi, I need to book a cleaning")
+        assert memory.get("reason") == "scale and polish"
+
+    def test_a_more_specific_reason_still_wins(self):
+        """The mapping must not swallow everything dental. Someone in pain is an emergency, not a
+        hygiene appointment, however they phrase the rest of it."""
+        memory = self.memory()
+        memory.observe("I was due a cleaning but my tooth is really hurting now")
+        assert memory.get("reason") == "emergency"
+

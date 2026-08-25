@@ -154,7 +154,7 @@ DEFAULT_INTAKE: list[Field] = [
     Field("age", "Age", "age", required=False,
           help="Under 18s need a parent or guardian present."),
     Field("reason", "What do you need?", "text", spoken_ok=True,
-          help="A check-up, a cleaning, pain — whatever brings you in."),
+          help="A check-up, a scale and polish, pain — whatever brings you in."),
 ]
 
 

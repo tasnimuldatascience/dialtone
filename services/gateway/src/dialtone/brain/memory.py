@@ -76,13 +76,26 @@ _NAME = re.compile(
 #: Why they are calling. Matched on the thing itself rather than on a phrase, because people say
 #: "my tooth hurts", "I need a cleaning" and "it's about a filling" and mean the same kind of
 #: thing by all three.
+#: ORDER IS PRECEDENCE -- the first category to match wins, and the loop stops there.
+#:
+#: URGENCY IS FIRST, deliberately. "I was due a cleaning but my tooth is really hurting now" was
+#: filed as a hygiene appointment, because the routine word appeared earlier in this map than the
+#: painful one. A practice that books that caller a scale and polish in three weeks has misread
+#: the call; the emergency slots exist for exactly this. The trade is that "a check-up, no pain or
+#: anything" now reads as an emergency, which is rare and fails in the safe direction.
 _REASONS = {
-    "check-up": ("check up", "checkup", "check-up", "routine", "exam", "examination"),
-    "cleaning": ("cleaning", "clean", "hygienist", "hygiene", "scale", "polish"),
-    "filling": ("filling", "cavity", "hole", "chipped", "broke", "broken"),
-    "emergency": ("emergency", "urgent", "pain", "painful", "hurts", "hurting", "ache",
+    "emergency": ("emergency", "urgent", "pain", "painful", "hurts", "hurting", "hurt", "ache",
                   "aching", "toothache", "swollen", "swelling", "knocked out", "bleeding",
-                  "abscess", "throbbing"),
+                  "abscess", "throbbing", "agony", "cracked"),
+    "check-up": ("check up", "checkup", "check-up", "routine", "exam", "examination"),
+    # THE CLINICAL NAME, and the colloquial ones alongside it. Patients ring up and ask for "a
+    # cleaning"; no dentist writes that in a record, where the procedure is a scale and polish.
+    # Both vocabularies belong here for the same reason the map exists at all -- the agent has to
+    # understand the one the caller uses and record the one the practice uses.
+    "scale and polish": ("scale and polish", "scale", "polish", "hygienist", "hygiene",
+                         "prophylaxis", "prophy", "cleaning", "cleanings", "clean", "cleaned",
+                         "descale"),
+    "filling": ("filling", "cavity", "hole", "chipped", "broke", "broken"),
     #: "my tooth" on its own says why they rang without saying what they need. Worth capturing --
     #: it is the commonest opening there is -- but as the vaguest category, so a later, more
     #: specific word still wins.
